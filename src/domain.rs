@@ -24,7 +24,12 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    #[cfg(test)]
     pub fn observe(&mut self, m: Measurement) {
+        self.observe_values(&m);
+        self.latest = Some(m);
+    }
+    pub fn observe_values(&mut self, m: &Measurement) {
         self.count += 1;
         let n = self.count as f64;
         self.average_voltage += (m.voltage_v - self.average_voltage) / n;
@@ -35,7 +40,6 @@ impl Metrics {
         } else {
             self.peak_power.max(m.power_w)
         };
-        self.latest = Some(m);
     }
 }
 

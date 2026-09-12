@@ -20,6 +20,7 @@ pub enum Action {
     Finish(Finish),
     StopRestart,
     Reset,
+    Configure,
 }
 pub struct UiState {
     pub metric: usize,
@@ -80,6 +81,7 @@ impl UiState {
             KeyCode::Char(']') => self.window = (self.window + 1).min(2),
             KeyCode::Char('r') => return Action::Reset,
             KeyCode::Char('s') => return Action::StopRestart,
+            KeyCode::Char('c') => return Action::Configure,
             _ => {}
         }
         Action::None
@@ -228,10 +230,17 @@ pub fn render(f: &mut Frame<'_>, v: View<'_>) {
         let metric = ["电压", "电流", "功率"][v.settings.metric];
         let chart = Chart::new(datasets)
             .block(panel(Line::from(vec![
-                Span::raw(format!(
-                    " {metric}趋势 · {} s · {unit}  ",
-                    v.settings.seconds()
-                )),
+                Span::raw(if compact {
+                    format!(
+                        " {metric}趋势 · {}s · {unit} · 缓存{:.1}/{:.0}M×2 待{} ",
+                        v.settings.seconds(),
+                        v.state.buffered_bytes as f64 / 1e6,
+                        v.state.config.buffer_size_bytes as f64 / 1e6,
+                        v.state.records.saturating_sub(v.state.saved)
+                    )
+                } else {
+                    format!(" {metric}趋势 · {} s · {unit}  ", v.settings.seconds())
+                }),
                 Span::styled("均值", Style::default().fg(Color::Yellow)),
                 Span::raw(" / "),
                 Span::styled("极值 ", Style::default().fg(Color::LightBlue)),
@@ -263,15 +272,33 @@ pub fn render(f: &mut Frame<'_>, v: View<'_>) {
             v.totals.sessions,
             v.totals.accepted,
             if v.remote {
-                "服务端已保存"
+                "服务端已存记录"
             } else {
-                "已暂存"
+                "已暂存记录"
             },
             v.totals.staged,
             v.totals.gaps,
             v.totals.invalid,
             v.totals.dropped
         );
+        if compact {
+            footer = format!(
+                "接受 {} · 已存 {} · 丢包 {} · 无效 {} · 丢样 {}",
+                v.totals.accepted,
+                v.totals.staged,
+                v.totals.gaps,
+                v.totals.invalid,
+                v.totals.dropped
+            );
+        }
+        footer.push_str(&format!(
+            "\n记录 {} Hz · 缓存 {:.2}/{:.2} MB ×2 · 待写 {} 条 · 写盘 {:.2} MB",
+            v.state.config.sample_rate_hz,
+            v.state.buffered_bytes as f64 / 1e6,
+            v.state.config.buffer_size_bytes as f64 / 1e6,
+            v.state.records.saturating_sub(v.state.saved),
+            v.state.writing_bytes as f64 / 1e6
+        ));
         if let Some(error) = v.notice.or(v.totals.error.as_deref()) {
             if compact {
                 footer = if v.remote {
@@ -291,16 +318,16 @@ pub fn render(f: &mut Frame<'_>, v: View<'_>) {
                 .block(panel(" 采集与保存 ")),
             rows[3],
         );
-        f.render_widget(Paragraph::new(if v.remote {"[1/2/3] 电压/电流/功率  [ / ] 时间窗\n[h] 会话 [d] 下载 [r] 刷新 [q/Ctrl+C] 退出客户端"}else{"[1/2/3] 电压/电流/功率  [ / ] 时间窗\n[s] 停止/新会话  [r] 重置显示  [q/Ctrl+C] 退出"}).style(Style::default().fg(Color::Cyan)),rows[4]);
+        f.render_widget(Paragraph::new(if v.remote {"[1/2/3] 电压/电流/功率  [ / ] 时间窗\n[c] 设置 [h] 会话 [d] 下载 [r] 刷新 [q/Ctrl+C] 退出客户端"}else{"[1/2/3] 电压/电流/功率  [ / ] 时间窗\n[c] 设置 [s] 停止/新会话  [r] 重置显示  [q/Ctrl+C] 退出"}).style(Style::default().fg(Color::Cyan)),rows[4]);
     }
     if let Some(progress) = v.progress {
         let text = format!(
-            "{}\n{} / {} 样本\n请等待操作完成…",
+            "{}\n{} / {} 记录\n请等待操作完成…",
             progress.message, progress.done, progress.total
         );
         modal(f, " 处理中 ", &text, None);
     } else if let Some(choice) = v.settings.dialog {
-        let mut text=format!("是否保存本次启动期间的数据？\n{} 个会话，{} 个已接受样本，{} 个已暂存样本\n目标：{}\n\n确认前采集继续；选择后停止并处理全部会话。",v.totals.sessions,v.totals.accepted,v.totals.staged,v.target);
+        let mut text=format!("是否保存本次启动期间的数据？\n{} 个会话，{} 个已接受样本，{} 条已暂存记录\n目标：{}\n\n确认前采集继续；选择后停止并处理全部会话。",v.totals.sessions,v.totals.accepted,v.totals.staged,v.target);
         if let Some(notice) = v.notice.or(v.totals.error.as_deref()) {
             text.push_str(&format!("\n\n{notice}\n缓存保留于：{}", v.cache));
         }
@@ -313,7 +340,13 @@ fn modal(f: &mut Frame<'_>, title: &str, text: &str, choice: Option<usize>) {
     let height = area
         .height
         .saturating_sub(2)
-        .min(if choice.is_some() { 20 } else { 8 })
+        .min(if choice.is_some() {
+            20
+        } else if title.contains("设置") {
+            12
+        } else {
+            8
+        })
         .max(1)
         .min(area.height);
     let rect = Rect::new(
@@ -354,10 +387,125 @@ fn modal(f: &mut Frame<'_>, title: &str, text: &str, choice: Option<usize>) {
         f.render_widget(Paragraph::new(lines), rows[1]);
     }
 }
+/// The same validated editor is used locally and by the remote client.
+pub struct ConfigEditor {
+    pub buffer: String,
+    pub rate: String,
+    pub field: usize,
+    pub error: Option<String>,
+    pub closed: bool,
+    replace: bool,
+}
+impl ConfigEditor {
+    pub fn new(config: crate::recording::Config) -> Self {
+        Self {
+            buffer: config.buffer_size_bytes.to_string(),
+            rate: config.sample_rate_hz.to_string(),
+            field: 0,
+            error: None,
+            closed: false,
+            replace: true,
+        }
+    }
+    pub fn key(&mut self, key: KeyEvent) -> Option<crate::recording::Config> {
+        if key.code == KeyCode::Esc
+            || key.code == KeyCode::Char('q')
+            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            self.closed = true;
+            return None;
+        }
+        if matches!(
+            key.code,
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down
+        ) {
+            self.field = 1 - self.field;
+            self.replace = true;
+            return None;
+        }
+        if key.code == KeyCode::Enter {
+            let result = (|| -> anyhow::Result<crate::recording::Config> {
+                let buffer_size_bytes =
+                    crate::recording::parse_size(&self.buffer).map_err(anyhow::Error::msg)?;
+                crate::recording::Config {
+                    buffer_size_bytes,
+                    sample_rate_hz: self.rate.parse()?,
+                }
+                .validate()
+            })();
+            match result {
+                Ok(c) => return Some(c),
+                Err(e) => self.error = Some(e.to_string()),
+            };
+            return None;
+        }
+        let value = if self.field == 0 {
+            &mut self.buffer
+        } else {
+            &mut self.rate
+        };
+        match key.code {
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                value.clear();
+                self.replace = false;
+            }
+            KeyCode::Backspace => {
+                if self.replace {
+                    value.clear();
+                } else {
+                    value.pop();
+                }
+                self.replace = false;
+            }
+            KeyCode::Char(c)
+                if c.is_ascii_alphanumeric() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                if self.replace {
+                    value.clear();
+                    self.replace = false;
+                }
+                if value.len() < 20 {
+                    value.push(c);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+    pub fn render(&self, f: &mut Frame<'_>) {
+        let text=format!("{} 每份缓存：{} 字节（可输入 10M / 10MiB）\n{} 软件记录速率：{} Hz（1–10000）\n\n双缓冲约使用两倍容量；设备仍接收完整数据。\n应用会先保存旧缓存，再开始新会话。\nTab 切换字段 · 输入替换 · Enter 应用 · Esc 取消\n{}",if self.field==0 {">"}else{" "},self.buffer,if self.field==1 {">"}else{" "},self.rate,self.error.as_deref().unwrap_or(""));
+        modal(f, " 采集设置 ", &text, None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    #[test]
+    fn settings_editor_validates_applies_and_cancels() {
+        let mut editor = ConfigEditor::new(crate::recording::Config::default());
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        for c in "10MiB".chars() {
+            editor.key(key(KeyCode::Char(c)));
+        }
+        editor.key(key(KeyCode::Tab));
+        editor.key(key(KeyCode::Char('0')));
+        assert!(editor.key(key(KeyCode::Enter)).is_none());
+        assert!(editor.error.is_some());
+        editor.key(key(KeyCode::Backspace));
+        for c in "333".chars() {
+            editor.key(key(KeyCode::Char(c)));
+        }
+        let config = editor.key(key(KeyCode::Enter)).unwrap();
+        assert_eq!(config.sample_rate_hz, 333);
+        assert_eq!(config.buffer_size_bytes, 10_485_760);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| editor.render(f)).unwrap();
+        assert!(terminal.backend().to_string().contains("采集设置"));
+        editor.key(key(KeyCode::Esc));
+        assert!(editor.closed);
+    }
     #[test]
     fn remote_layout_identifies_service_storage_without_local_save_actions() {
         let mut terminal = Terminal::new(TestBackend::new(140, 32)).unwrap();
@@ -384,11 +532,11 @@ mod tests {
             .unwrap();
         let text = terminal.backend().to_string();
         assert!(text.contains("127.0.0.1:8080"));
-        assert!(text.contains("服务端已保存"));
+        assert!(text.contains("服务端已存记录"));
         assert!(text.contains("离线"));
         assert!(text.contains("退出客户端"));
         assert!(!text.contains("停止/新会话"));
-        assert!(!text.contains("已暂存"));
+        assert!(!text.contains("已暂存记录"));
     }
     #[test]
     fn keys_select_metrics_windows_and_cancel_without_exit() {
@@ -481,7 +629,7 @@ mod tests {
             if width >= 48 && height >= 24 {
                 let text = terminal.backend().to_string();
                 assert!(text.contains("保存并退出"), "{width}x{height}: {text}");
-                assert!(text.contains("不保存退出"));
+                assert!(text.contains("不保存退出"), "{width}x{height}: {text}");
             }
         }
     }
@@ -505,8 +653,8 @@ mod tests {
                 status: "synthetic".into(),
                 raw: vec![],
             };
-            s.history.observe(&m);
-            s.metrics.observe(m);
+            std::sync::Arc::make_mut(&mut s.history).observe(&m);
+            std::sync::Arc::make_mut(&mut s.metrics).observe(m);
         }
         s.accepted = 3000;
         s.received = 3000;

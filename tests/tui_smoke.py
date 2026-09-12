@@ -78,7 +78,7 @@ def main():
             assert not target.exists(), "Destination changed before save confirmation"
             captures = pending(root)
             assert len(captures) == 1
-            observed.append(sample_count(captures[0]))
+            observed.append((sample_count(captures[0]), len(output)))
 
         code, output = run_tui(
             ["--mock", "--db", str(target)],
@@ -90,7 +90,8 @@ def main():
         )
         assert code == 0, output[-3000:]
         assert len(observed) == 3, "Up + Enter did not cancel the exit dialog"
-        assert observed[1] > observed[0], "Capture stopped while exit dialog was open"
+        assert observed[0][0] == observed[1][0] == 0, "Subthreshold cache wrote early"
+        assert observed[1][1] > observed[0][1], "Live display stopped while exit dialog was open"
         sessions = rows(target)
         assert len(sessions) == 2, sessions
         assert all(a == s and a > 0 and o == "complete" and e for a, s, o, e in sessions)

@@ -1,0 +1,4 @@
+[env]
+# SQLite memory-status counters add allocator locking on small CPUs. Process RSS
+# and our recording-buffer accounting remain available; durability is unchanged.
+LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0"

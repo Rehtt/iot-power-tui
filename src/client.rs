@@ -20,9 +20,11 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Remote {
-    live: Option<Live>,
+    live: Option<Arc<Live>>,
+    config: Option<crate::network::ConfigState>,
+    config_busy: bool,
     seen: Option<Instant>,
     error: Option<String>,
     sessions: Vec<Session>,
@@ -34,6 +36,8 @@ enum Command {
     Sessions(Option<i64>),
     Download(i64),
     Refresh,
+    LoadConfig,
+    ApplyConfig(crate::recording::Config, u64),
 }
 struct Workers {
     stop: Arc<AtomicBool>,
@@ -121,12 +125,13 @@ pub fn run(args: &Args) -> Result<()> {
             let result = (|| -> Result<Live> {
                 let response = agent
                     .get(format!("{url}/api/v1/status"))
+                    .header(reqwest::header::ACCEPT, "application/vnd.iot-power.live-v1")
                     .send()?
                     .error_for_status()?;
                 let mut bytes = Vec::new();
                 response.take(512 * 1024 + 1).read_to_end(&mut bytes)?;
                 ensure!(bytes.len() <= 512 * 1024, "status exceeds limit");
-                let live: Live = serde_json::from_slice(&bytes)?;
+                let live = crate::network::decode_live(&bytes)?;
                 ensure!(
                     live.version == 1 && live.buckets.len() <= 600,
                     "unsupported live response"
@@ -137,7 +142,7 @@ pub fn run(args: &Args) -> Result<()> {
                 let mut remote = data.lock().unwrap();
                 match result {
                     Ok(live) => {
-                        remote.live = Some(live);
+                        remote.live = Some(Arc::new(live));
                         remote.seen = Some(Instant::now());
                         remote.error = None;
                     }
@@ -173,6 +178,7 @@ pub fn run(args: &Args) -> Result<()> {
                 Ok(c) => c,
                 Err(_) => continue,
             };
+            let configuring=matches!(command,Command::ApplyConfig(..));
             let downloading = matches!(command,Command::Download(_));
             let result = (|| -> Result<String> {
                 match command {
@@ -203,11 +209,33 @@ pub fn run(args: &Args) -> Result<()> {
                         })?;
                         Ok(format!("已下载：{}", path.display()))
                     }
+                    Command::LoadConfig => {
+                        let config:crate::network::ConfigState=http.get(format!("{url}/api/v1/config")).send()?.error_for_status()?.json()?;
+                        data.lock().unwrap().config=Some(config);
+                        Ok("设置已读取".into())
+                    }
+                    Command::ApplyConfig(config,revision) => {
+                        let request=crate::network::ConfigRequest {buffer_size_bytes:config.buffer_size_bytes,sample_rate_hz:config.sample_rate_hz,revision};
+                        let response=http.put(format!("{url}/api/v1/config")).json(&request).send()?;
+                        let status=response.status();
+                        anyhow::ensure!(status.is_success(),"配置提交失败：{} {}",status,response.text()?);
+                        loop {
+                            anyhow::ensure!(!cancel.load(Ordering::Relaxed),"configuration wait cancelled");
+                            let config:crate::network::ConfigState=http.get(format!("{url}/api/v1/config")).send()?.error_for_status()?.json()?;
+                            let done=config.state!="applying";
+                            let error=config.error.clone();
+                            {let mut d=data.lock().unwrap();d.config=Some(config);d.message="正在排空旧缓存并应用设置…".into();}
+                            if done {if let Some(e)=error {anyhow::bail!(e);}break;}
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        Ok("设置已应用，新会话已开始".into())
+                    }
                     Command::Refresh => Ok("实时数据每 200 ms 自动刷新".into()),
                 }
             })();
             let mut remote = data.lock().unwrap();
             if downloading { remote.downloading = false; }
+            if configuring {remote.config_busy=false;}
             remote.message = match result {
                 Ok(s) => s,
                 Err(e) => format!("操作失败：{e:#}"),
@@ -219,10 +247,23 @@ pub fn run(args: &Args) -> Result<()> {
     let mut settings = ui::UiState::default();
     let mut history = false;
     let mut selection = 0usize;
+    let mut editor: Option<ui::ConfigEditor> = None;
+    let mut editor_revision = 0;
+    let mut waiting_config = false;
     loop {
+        let frame_deadline = Instant::now() + Duration::from_millis(100);
         {
-            let data = shared.lock().unwrap();
-            let state = data.live.as_ref().map(Live::shared).unwrap_or_default();
+            let data = shared.lock().unwrap().clone();
+            if waiting_config {
+                if let Some(config) = &data.config {
+                    let mut edit = ui::ConfigEditor::new(config.config);
+                    edit.error = config.error.clone();
+                    editor = Some(edit);
+                    editor_revision = config.revision;
+                    waiting_config = false;
+                }
+            }
+            let state = data.live.as_ref().map(|l| l.shared()).unwrap_or_default();
             let mut totals = ui::Totals::default();
             totals.add(&state);
             let fresh = data
@@ -269,7 +310,7 @@ pub fn run(args: &Args) -> Result<()> {
                     let offset = selection.saturating_sub(visible - 1);
                     for (i, s) in data.sessions.iter().enumerate().skip(offset).take(visible) {
                         lines.push(format!(
-                            "{} #{} {} {} 样本 {}",
+                            "{} #{} {} {} 条记录 {}",
                             if i == selection { ">" } else { " " },
                             s.id,
                             s.started_at,
@@ -287,9 +328,12 @@ pub fn run(args: &Args) -> Result<()> {
                         area,
                     );
                 }
+                if let Some(edit) = &editor {
+                    edit.render(f);
+                }
             })?;
         }
-        if !event::poll(Duration::from_millis(100))? {
+        if !event::poll(frame_deadline.saturating_duration_since(Instant::now()))? {
             continue;
         }
         let Event::Key(key) = event::read()? else {
@@ -298,11 +342,42 @@ pub fn run(args: &Args) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if let Some(edit) = &mut editor {
+            if let Some(config) = edit.key(key) {
+                let mut remote = shared.lock().unwrap();
+                if !remote.config_busy {
+                    if tx
+                        .try_send(Command::ApplyConfig(config, editor_revision))
+                        .is_ok()
+                    {
+                        remote.config_busy = true;
+                        remote.message = "配置正在提交…".into();
+                        editor = None;
+                    } else {
+                        edit.error = Some("操作队列忙，请稍后重试".into());
+                    }
+                }
+            } else if edit.closed {
+                editor = None;
+            }
+            continue;
+        }
         let action = settings.key(key);
         if action == ui::Action::RequestExit {
             break;
         }
         let command = match key.code {
+            KeyCode::Char('c') => {
+                let mut data = shared.lock().unwrap();
+                if data.config_busy {
+                    data.message = "配置正在应用，请等待".into();
+                    None
+                } else {
+                    data.config = None;
+                    waiting_config = true;
+                    Some(Command::LoadConfig)
+                }
+            }
             KeyCode::Char('h') => {
                 history = !history;
                 selection = 0;

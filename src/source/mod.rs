@@ -15,6 +15,7 @@ pub mod replay;
 pub mod serial;
 pub mod usb;
 
+#[derive(Clone)]
 pub struct Batch {
     pub frame: Vec<u8>,
     pub packet_id: Option<u32>,
@@ -23,6 +24,7 @@ pub struct Batch {
     pub gaps: u64,
     pub invalid: u64,
 }
+#[derive(Clone)]
 pub struct SessionInfo {
     pub device: String,
     pub transport: &'static str,
@@ -32,6 +34,8 @@ pub struct SessionInfo {
 pub enum Message {
     Ready(SessionInfo),
     Batch(Batch),
+    Snapshot(crate::runtime::SnapshotReply),
+    End,
 }
 pub struct Sink {
     pub tx: SyncSender<Message>,

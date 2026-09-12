@@ -6,11 +6,12 @@ This Rust terminal application collects IoT Power CC measurements.
 
 - `src/main.rs`: CLI, application loop, worker coordination, and terminal restoration.
 - `src/domain.rs`: measurements and display metrics.
+- `src/recording.rs`: recording configuration, timestamp aggregation, and memory accounting.
 - `src/history.rs` and `src/ui.rs`: bounded chart aggregation, layouts, and exit dialog.
 - `src/workspace.rs`: per-run staging, save/import, and explicit discard.
 - `src/protocol.rs`: CC framing, calibration, timestamps, and decoding.
 - `src/source/`: native USB, mock, replay, and serial JSONL adapters.
-- `src/network.rs` and `src/client.rs`: read-only service API, consistent session exports, and remote TUI.
+- `src/network.rs` and `src/client.rs`: service API and versioned configuration, consistent session exports, and remote TUI.
 - `src/runtime.rs`: cancellation, bounded queues, capture state, and database worker.
 - `src/storage.rs`: SQLite migration, batch transactions, and session finalization.
 - `docs/cc-protocol.md`: protocol evidence and formulas.
@@ -42,7 +43,7 @@ Use stable Rust and rustfmt defaults: four-space indentation and trailing commas
 
 ## Testing Guidelines
 
-Prefer deterministic tests without hardware. Cover framing, calibration ranges, unit conversion, packet gaps/wrap, SQLite migrations, transaction rollback, cancellation, backpressure, and session lifecycle. Name tests after behavior, such as `source_failure_drains_accepted_packets_and_marks_incomplete`. Run all four checks above before submitting. Record actual hardware results separately; synthetic arithmetic tests do not establish device accuracy.
+Prefer deterministic tests without hardware. Cover framing, calibration ranges, unit conversion, packet gaps/wrap, SQLite migrations, transaction rollback, cancellation, backpressure, and session lifecycle. Name tests after behavior, such as `source_failure_drains_accepted_packets_and_marks_incomplete`. Run all four checks above before submitting. For interaction changes, also run `python3 tests/tui_smoke.py` and the `tests/service_*.py` scripts. Record actual hardware results separately; synthetic arithmetic tests do not establish device accuracy.
 
 ## Commit & Pull Request Guidelines
 

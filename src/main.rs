@@ -3,6 +3,7 @@ mod domain;
 mod history;
 mod network;
 mod protocol;
+mod recording;
 mod runtime;
 mod source;
 mod storage;
@@ -54,8 +55,21 @@ struct Args {
     replay: Option<String>,
     #[arg(long, default_value = "./data/iot-power.db")]
     db: String,
+    /// Bytes per recording buffer (two buffers); M is decimal, MiB is binary.
+    #[arg(long, default_value="10M",value_parser=recording::parse_size,conflicts_with_all=["client","list_devices"])]
+    buffer_size: usize,
+    /// Software recording rate in Hz; CC acquisition remains 10000 Hz.
+    #[arg(long,default_value_t=10000,conflicts_with_all=["client","list_devices"])]
+    sample_rate: u32,
 }
 impl Args {
+    fn config(&self) -> recording::Config {
+        recording::Config {
+            buffer_size_bytes: self.buffer_size,
+            sample_rate_hz: self.sample_rate,
+        }
+    }
+
     fn source(&self) -> Box<dyn source::DataSource> {
         if self.usb || (self.service && !self.mock && self.replay.is_none() && self.port.is_none())
         {
@@ -92,6 +106,7 @@ impl Drop for TerminalGuard {
 #[derive(Clone, Copy)]
 enum OperationKind {
     Stop,
+    Reconfigure(recording::Config),
     CheckEmpty,
     Finish(ui::Finish),
 }
@@ -126,6 +141,14 @@ fn begin_operation(
         runtime.stop();
         let result = (|| -> Result<Completion> {
             match kind {
+                OperationKind::Reconfigure(_) => {
+                    runtime.ensure_saved()?;
+                    Ok(Completion {
+                        exit: false,
+                        saved: false,
+                        warning: None,
+                    })
+                }
                 OperationKind::Stop => Ok(Completion {
                     exit: false,
                     saved: false,
@@ -143,6 +166,7 @@ fn begin_operation(
                     })
                 }
                 OperationKind::Finish(ui::Finish::Save) => {
+                    runtime.ensure_saved()?;
                     progress.lock().unwrap().message = "保存到目标数据库".into();
                     let warning = workspace.save(|done, total| {
                         let mut p = progress.lock().unwrap();
@@ -175,6 +199,7 @@ fn begin_operation(
 }
 fn main() -> Result<()> {
     let args = Args::parse();
+    args.config().validate()?;
     ensure!(
         args.addr.is_none() || args.service || args.client,
         "--addr requires --service or --client"
@@ -205,7 +230,13 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
     let cache_label = workspace.database.display().to_string();
     let guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-    let mut runtime = Some(Runtime::start(args.source(), cache_label.clone()));
+    let mut config = args.config();
+    let mut editor: Option<ui::ConfigEditor> = None;
+    let mut runtime = Some(Runtime::start_config(
+        args.source(),
+        cache_label.clone(),
+        config,
+    ));
     let mut shared = runtime.as_ref().unwrap().shared.clone();
     let mut workspace = Some(workspace);
     let mut totals = ui::Totals::default();
@@ -234,13 +265,32 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
             match result {
                 Ok(completion) if completion.exit => break completion,
                 Ok(_) => {
+                    if let OperationKind::Reconfigure(next) = kind {
+                        totals.add(&shared.lock().unwrap());
+                        config = next;
+                        runtime = Some(Runtime::start_config(
+                            args.source(),
+                            cache_label.clone(),
+                            config,
+                        ));
+                        shared = runtime.as_ref().unwrap().shared.clone();
+                        rate_at = Instant::now();
+                        rate_count = 0;
+                        rate = 0.0;
+                        notice = None;
+                    }
                     if matches!(kind, OperationKind::CheckEmpty) {
                         settings.dialog = Some(0);
                     }
                 }
                 Err(e) => {
                     notice = Some(format!("操作失败：{e:#}。可重试保存或选择不保存。"));
-                    settings.dialog = Some(0);
+                    if let OperationKind::Reconfigure(next) = kind {
+                        editor = Some(ui::ConfigEditor::new(next));
+                        editor.as_mut().unwrap().error = notice.clone();
+                    } else {
+                        settings.dialog = Some(0);
+                    }
                 }
             }
         }
@@ -253,6 +303,7 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
             rate_at = Instant::now();
         }
         let snapshot = progress.lock().unwrap().clone();
+        let frame_deadline = Instant::now() + Duration::from_millis(100);
         terminal.draw(|f| {
             ui::render(
                 f,
@@ -267,9 +318,12 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
                     progress: operation.as_ref().map(|_| &snapshot),
                     notice: notice.as_deref(),
                 },
-            )
+            );
+            if let Some(edit) = &editor {
+                edit.render(f);
+            }
         })?;
-        if !event::poll(Duration::from_millis(100))? {
+        if !event::poll(frame_deadline.saturating_duration_since(Instant::now()))? {
             continue;
         }
         let Event::Key(key) = event::read()? else {
@@ -278,34 +332,47 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
         if key.kind != KeyEventKind::Press || operation.is_some() {
             continue;
         }
-        let kind = match settings.key(key) {
-            ui::Action::None => None,
-            ui::Action::Reset => {
-                runtime.as_ref().unwrap().reset_metrics();
+        let edit_result = editor.as_mut().and_then(|edit| edit.key(key));
+        if editor.as_ref().is_some_and(|edit| edit.closed) {
+            editor = None;
+            continue;
+        }
+        if editor.is_some() && edit_result.is_none() {
+            continue;
+        }
+        let kind = if let Some(next) = edit_result {
+            editor = None;
+            if next == config && s.state == State::Capturing {
                 None
+            } else {
+                Some(OperationKind::Reconfigure(next))
             }
-            ui::Action::RequestExit => {
-                if current.accepted == 0 {
-                    Some(OperationKind::CheckEmpty)
-                } else {
-                    settings.dialog = Some(0);
+        } else {
+            match settings.key(key) {
+                ui::Action::Configure => {
+                    editor = Some(ui::ConfigEditor::new(config));
                     None
                 }
-            }
-            ui::Action::Finish(action) => Some(OperationKind::Finish(action)),
-            ui::Action::StopRestart => {
-                if matches!(s.state, State::Stopped | State::Fault) {
-                    runtime.as_mut().unwrap().stop();
-                    totals.add(&shared.lock().unwrap());
-                    runtime = Some(Runtime::start(args.source(), cache_label.clone()));
-                    shared = runtime.as_ref().unwrap().shared.clone();
-                    rate_at = Instant::now();
-                    rate_count = 0;
-                    rate = 0.0;
-                    notice = None;
+                ui::Action::None => None,
+                ui::Action::Reset => {
+                    runtime.as_ref().unwrap().reset_metrics();
                     None
-                } else {
-                    Some(OperationKind::Stop)
+                }
+                ui::Action::RequestExit => {
+                    if current.accepted == 0 {
+                        Some(OperationKind::CheckEmpty)
+                    } else {
+                        settings.dialog = Some(0);
+                        None
+                    }
+                }
+                ui::Action::Finish(action) => Some(OperationKind::Finish(action)),
+                ui::Action::StopRestart => {
+                    if matches!(s.state, State::Stopped | State::Fault) {
+                        Some(OperationKind::Reconfigure(config))
+                    } else {
+                        Some(OperationKind::Stop)
+                    }
                 }
             }
         };
@@ -338,6 +405,37 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recording_cli_defaults_units_and_invalid_rates() {
+        let default = Args::try_parse_from(["app", "--usb"]).unwrap();
+        assert_eq!(default.config(), recording::Config::default());
+        let changed = Args::try_parse_from([
+            "app",
+            "--service",
+            "--buffer-size",
+            "10MiB",
+            "--sample-rate",
+            "333",
+        ])
+        .unwrap();
+        assert_eq!(
+            changed.config().validate().unwrap(),
+            recording::Config {
+                buffer_size_bytes: 10_485_760,
+                sample_rate_hz: 333
+            }
+        );
+        for rate in ["0", "10001"] {
+            assert!(
+                Args::try_parse_from(["app", "--usb", "--sample-rate", rate])
+                    .unwrap()
+                    .config()
+                    .validate()
+                    .is_err()
+            );
+        }
+        assert!(Args::try_parse_from(["app", "--client", "--sample-rate", "333"]).is_err());
+    }
     #[test]
     fn service_client_cli_modes_and_conflicts() {
         for arguments in [

@@ -861,6 +861,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures-util",
+ "libc",
  "ratatui",
  "reqwest",
  "rusb",

@@ -35,7 +35,7 @@ def main():
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 try:
-                    if status()['saved']:
+                    if status()['accepted']:
                         return proc
                 except OSError:
                     pass
@@ -54,7 +54,7 @@ def main():
         proc = start()
         held = None
         try:
-            before = status()['saved']
+            before = status()['accepted']
             held = http.client.HTTPConnection(addr, timeout=20)
             held.connect()
             held.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -72,7 +72,7 @@ def main():
                 live = status()
                 latencies.append(time.monotonic() - at)
                 time.sleep(.2)
-            assert live['saved'] > before
+            assert live['accepted'] > before
             assert max(latencies) < 2, latencies
             rss_kb = int(next(line.split()[1] for line in Path(f'/proc/{proc.pid}/status').read_text().splitlines() if line.startswith('VmRSS:')))
             assert rss_kb < 100_000, rss_kb

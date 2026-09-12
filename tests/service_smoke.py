@@ -38,7 +38,7 @@ def main():
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 try:
-                    if status()['saved'] > 0:
+                    if status()['accepted'] > 0:
                         return process
                 except OSError:
                     pass
