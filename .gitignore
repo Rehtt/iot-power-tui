@@ -1,0 +1,13 @@
+/target/
+/data/
+/work/
+*.db
+*.db-shm
+*.db-wal
+
+.iot-power-pending/
+
+# Local deliverables and Python test caches
+/outputs/
+__pycache__/
+*.py[cod]
