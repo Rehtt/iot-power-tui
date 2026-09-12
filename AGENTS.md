@@ -10,6 +10,7 @@ This Rust terminal application collects IoT Power CC measurements.
 - `src/workspace.rs`: per-run staging, save/import, and explicit discard.
 - `src/protocol.rs`: CC framing, calibration, timestamps, and decoding.
 - `src/source/`: native USB, mock, replay, and serial JSONL adapters.
+- `src/network.rs` and `src/client.rs`: read-only service API, consistent session exports, and remote TUI.
 - `src/runtime.rs`: cancellation, bounded queues, capture state, and database worker.
 - `src/storage.rs`: SQLite migration, batch transactions, and session finalization.
 - `docs/cc-protocol.md`: protocol evidence and formulas.
@@ -27,6 +28,8 @@ cargo clippy --all-targets -- -D warnings
 cargo run -- --list-devices          # List CC devices
 cargo run -- --usb                   # Native CC capture
 cargo run -- --mock                  # Generated measurements
+cargo run -- --service               # Headless USB capture + LAN API
+cargo run -- --client --addr 127.0.0.1:8080 # Remote TUI
 cargo run -- --replay samples.jsonl  # Replay measurements
 cargo run -- --port /dev/ttyACM0      # Serial JSONL, not CC USB
 ```

@@ -1,7 +1,7 @@
 use crate::domain::Measurement;
 use std::collections::VecDeque;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
     pub count: u64,
     pub mean: f64,
@@ -25,7 +25,7 @@ impl Stats {
         self.max = self.max.max(other.max);
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Bucket {
     pub time: i64,
     pub values: [Stats; 3],
@@ -45,6 +45,15 @@ pub struct Series {
     pub max: Vec<(f64, f64)>,
 }
 impl History {
+    pub fn buckets(&self) -> Vec<Bucket> {
+        self.buckets.iter().cloned().collect()
+    }
+    pub fn from_buckets(buckets: Vec<Bucket>) -> Self {
+        Self {
+            buckets: buckets.into_iter().take(600).collect(),
+            ..Self::default()
+        }
+    }
     pub fn break_line(&mut self) {
         self.broken = true;
     }
@@ -87,13 +96,18 @@ impl History {
             return Vec::new();
         };
         let width = (seconds as i64 * 10 + columns.max(1) as i64 - 1) / columns.max(1) as i64;
+        let width = width.max(1);
+        let start = latest.time - seconds as i64 * 10 + 1;
         let mut aggregated: Vec<(i64, u64, Stats)> = Vec::new();
-        for b in self
-            .buckets
-            .iter()
-            .filter(|b| latest.time - b.time < seconds as i64 * 10)
-        {
-            let column = (b.time - (latest.time - seconds as i64 * 10 + 1)) / width.max(1);
+        for b in &self.buckets {
+            // Anchor groups to measurement time, not the moving window. Otherwise
+            // every scroll reassigns old samples and changes their mean/extrema.
+            let column = b.time.div_euclid(width);
+            // Drop the whole group at the left edge instead of recomputing it
+            // from a shrinking subset as samples leave the visible window.
+            if column * width < start {
+                continue;
+            }
             if let Some(last) = aggregated
                 .last_mut()
                 .filter(|last| last.0 == column && last.1 == b.segment)
@@ -110,7 +124,7 @@ impl History {
                 out.push(Series::default());
                 previous = Some(segment);
             }
-            let x = ((column + 1) * width) as f64 / 10.0 - seconds as f64;
+            let x = ((column + 1) * width - 1 - latest.time) as f64 / 10.0;
             let line = out.last_mut().expect("segment created");
             line.mean.push((x.min(0.0), stats.mean));
             line.min.push((x.min(0.0), stats.min));
@@ -176,6 +190,74 @@ mod tests {
         assert_eq!(series[0].max[0].1, 100.0);
         assert_eq!(series[0].min[0].1, 0.0);
         assert!((series[0].mean[0].1 - 110.0 / 1001.0).abs() < 1e-12);
+    }
+    fn absolute_points(h: &History, seconds: u32, columns: usize) -> Vec<(i64, [f64; 3])> {
+        let latest = h.buckets.back().unwrap().time;
+        h.series(1, seconds, columns)
+            .into_iter()
+            .flat_map(|line| {
+                line.mean
+                    .into_iter()
+                    .zip(line.min)
+                    .zip(line.max)
+                    .map(move |((mean, min), max)| {
+                        (
+                            latest + (mean.0 * 10.0).round() as i64,
+                            [mean.1, min.1, max.1],
+                        )
+                    })
+            })
+            .collect()
+    }
+    #[test]
+    fn completed_groups_keep_values_and_timestamps_while_the_window_scrolls() {
+        for seconds in [10, 30, 60] {
+            for columns in [17, 53, 120] {
+                let mut h = History::default();
+                for t in 0..610 {
+                    h.observe(&sample(t * 100_000, (t % 13) as f64));
+                    // Unequal counts and narrow spikes must remain unchanged too.
+                    if t % 7 == 0 {
+                        h.observe(&sample(t * 100_000 + 1, -50.0));
+                    }
+                }
+                let baseline = absolute_points(&h, seconds, columns);
+                let width = (i64::from(seconds) * 10 + columns as i64 - 1) / columns as i64;
+                let mut compared = 0;
+                for t in 610..650 {
+                    h.observe(&sample(t * 100_000, (t % 13) as f64));
+                    // The client receives a new full snapshot on every poll.
+                    let remote = History::from_buckets(h.buckets());
+                    let points = absolute_points(&remote, seconds, columns);
+                    for &(time, values) in &baseline {
+                        if time < 609 && time - width + 1 >= t - i64::from(seconds) * 10 + 1 {
+                            assert_eq!(
+                                points.iter().find(|p| p.0 == time),
+                                Some(&(time, values)),
+                                "{seconds}s, {columns} columns, now={t}, group ending={time}"
+                            );
+                            compared += 1;
+                        }
+                    }
+                }
+                assert!(compared > 0);
+            }
+        }
+    }
+    #[test]
+    fn scrolling_removes_a_clipped_left_group_instead_of_recomputing_it() {
+        let mut h = History::default();
+        for t in 0..200 {
+            h.observe(&sample(t * 100_000, if t == 100 { 100.0 } else { 0.0 }));
+        }
+        let before = absolute_points(&h, 10, 25);
+        assert_eq!(before[0].0, 103);
+        assert!((before[0].1[0] - 25.0).abs() < 1e-12);
+        assert_eq!(before[0].1[1..], [0.0, 100.0]);
+        h.observe(&sample(20_000_000, 0.0));
+        let after = absolute_points(&h, 10, 25);
+        assert_eq!(after[0].0, 107);
+        assert_eq!(after[..after.len() - 1], before[1..]);
     }
     #[test]
     fn bounds_history_and_breaks_gaps_and_backward_time() {

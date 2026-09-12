@@ -48,11 +48,11 @@ impl UiState {
                 return Action::None;
             }
             return match key.code {
-                KeyCode::Left | KeyCode::BackTab => {
+                KeyCode::Up | KeyCode::Left | KeyCode::BackTab => {
                     *choice = (*choice + 2) % 3;
                     Action::None
                 }
-                KeyCode::Right | KeyCode::Tab => {
+                KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
                     *choice = (*choice + 1) % 3;
                     Action::None
                 }
@@ -122,6 +122,7 @@ pub struct View<'a> {
     pub settings: &'a UiState,
     pub rate: f64,
     pub target: &'a str,
+    pub remote: bool,
     pub cache: &'a str,
     pub progress: Option<&'a Progress>,
     pub notice: Option<&'a str>,
@@ -145,8 +146,12 @@ pub fn render(f: &mut Frame<'_>, v: View<'_>) {
     let area = f.area();
     if area.width < 48 || area.height < 16 {
         f.render_widget(
-            Paragraph::new("请调整终端至至少 48 列 × 16 行\n[q / Ctrl+C] 退出并选择保存")
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(if v.remote {
+                "请调整终端至至少 48 列 × 16 行\n[q / Ctrl+C] 退出客户端"
+            } else {
+                "请调整终端至至少 48 列 × 16 行\n[q / Ctrl+C] 退出并选择保存"
+            })
+            .wrap(Wrap { trim: false }),
             area,
         );
     } else {
@@ -166,7 +171,11 @@ pub fn render(f: &mut Frame<'_>, v: View<'_>) {
                 Span::styled(format!(" {label} "), Style::default().fg(color).bold()),
                 Span::raw(format!("{device}   {:.0} samples/s", v.rate)),
             ]))
-            .block(panel(" IoT Power CC ")),
+            .block(panel(if v.remote {
+                format!(" IoT Power CC · {} ", v.target)
+            } else {
+                " IoT Power CC ".into()
+            })),
             rows[0],
         );
         let text = if let Some(m) = &v.state.metrics.latest {
@@ -250,9 +259,14 @@ pub fn render(f: &mut Frame<'_>, v: View<'_>) {
             );
         f.render_widget(chart, rows[2]);
         let mut footer = format!(
-            "本次 {} 会话  接受 {}  已暂存 {}  丢包 {}  无效 {}  丢样 {}",
+            "本次 {} 会话  接受 {}  {} {}  丢包 {}  无效 {}  丢样 {}",
             v.totals.sessions,
             v.totals.accepted,
+            if v.remote {
+                "服务端已保存"
+            } else {
+                "已暂存"
+            },
             v.totals.staged,
             v.totals.gaps,
             v.totals.invalid,
@@ -260,12 +274,16 @@ pub fn render(f: &mut Frame<'_>, v: View<'_>) {
         );
         if let Some(error) = v.notice.or(v.totals.error.as_deref()) {
             if compact {
-                footer = format!("异常：{error}");
+                footer = if v.remote {
+                    format!("服务端已保存 {} | {error}", v.totals.staged)
+                } else {
+                    format!("异常：{error}")
+                };
             } else {
                 footer.push_str(&format!("\n{error}"));
             }
         } else if !compact {
-            footer.push_str("\n数据尚未写入最终数据库，退出时选择保存。\n图表保留最小/最大值；USB 时间为估算时间。");
+            footer.push_str(if v.remote {"\n详细数据保存在服务端；[h] 历史会话 [d] 下载 SQLite"}else{"\n数据尚未写入最终数据库，退出时选择保存。\n图表保留最小/最大值；USB 时间为估算时间。"});
         }
         f.render_widget(
             Paragraph::new(footer)
@@ -273,7 +291,7 @@ pub fn render(f: &mut Frame<'_>, v: View<'_>) {
                 .block(panel(" 采集与保存 ")),
             rows[3],
         );
-        f.render_widget(Paragraph::new("[1/2/3] 电压/电流/功率  [ / ] 时间窗\n[s] 停止/新会话  [r] 重置显示  [q/Ctrl+C] 退出").style(Style::default().fg(Color::Cyan)),rows[4]);
+        f.render_widget(Paragraph::new(if v.remote {"[1/2/3] 电压/电流/功率  [ / ] 时间窗\n[h] 会话 [d] 下载 [r] 刷新 [q/Ctrl+C] 退出客户端"}else{"[1/2/3] 电压/电流/功率  [ / ] 时间窗\n[s] 停止/新会话  [r] 重置显示  [q/Ctrl+C] 退出"}).style(Style::default().fg(Color::Cyan)),rows[4]);
     }
     if let Some(progress) = v.progress {
         let text = format!(
@@ -332,7 +350,7 @@ fn modal(f: &mut Frame<'_>, title: &str, text: &str, choice: Option<usize>) {
                 },
             ));
         }
-        lines.push(Line::raw("Tab / 方向键选择，Enter 确认"));
+        lines.push(Line::raw("↑↓ / ←→ / Tab 选择，Enter 确认"));
         f.render_widget(Paragraph::new(lines), rows[1]);
     }
 }
@@ -340,6 +358,38 @@ fn modal(f: &mut Frame<'_>, title: &str, text: &str, choice: Option<usize>) {
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    #[test]
+    fn remote_layout_identifies_service_storage_without_local_save_actions() {
+        let mut terminal = Terminal::new(TestBackend::new(140, 32)).unwrap();
+        let state = Shared::default();
+        let totals = Totals::default();
+        let settings = UiState::default();
+        terminal
+            .draw(|f| {
+                render(
+                    f,
+                    View {
+                        state: &state,
+                        totals: &totals,
+                        settings: &settings,
+                        rate: 0.0,
+                        target: "http://127.0.0.1:8080",
+                        remote: true,
+                        cache: "",
+                        progress: None,
+                        notice: Some("离线：保留最后图表"),
+                    },
+                )
+            })
+            .unwrap();
+        let text = terminal.backend().to_string();
+        assert!(text.contains("127.0.0.1:8080"));
+        assert!(text.contains("服务端已保存"));
+        assert!(text.contains("离线"));
+        assert!(text.contains("退出客户端"));
+        assert!(!text.contains("停止/新会话"));
+        assert!(!text.contains("已暂存"));
+    }
     #[test]
     fn keys_select_metrics_windows_and_cancel_without_exit() {
         let mut ui = UiState::default();
@@ -357,6 +407,26 @@ mod tests {
             ui.key(KeyCode::Char('n').into()),
             Action::Finish(Finish::Discard)
         );
+        for key in [KeyCode::Up, KeyCode::Left, KeyCode::BackTab] {
+            ui.dialog = Some(0);
+            assert_eq!(ui.key(key.into()), Action::None);
+            assert_eq!(ui.dialog, Some(2));
+            assert_eq!(ui.key(KeyCode::Enter.into()), Action::None);
+            assert!(ui.dialog.is_none());
+        }
+        for key in [KeyCode::Down, KeyCode::Right, KeyCode::Tab] {
+            ui.dialog = Some(0);
+            assert_eq!(ui.key(key.into()), Action::None);
+            assert_eq!(ui.dialog, Some(1));
+            assert_eq!(
+                ui.key(KeyCode::Enter.into()),
+                Action::Finish(Finish::Discard)
+            );
+            ui.dialog = Some(2);
+            ui.key(key.into());
+            assert_eq!(ui.dialog, Some(0));
+            assert_eq!(ui.key(KeyCode::Enter.into()), Action::Finish(Finish::Save));
+        }
     }
     #[test]
     fn renders_responsive_layout_dialog_and_tiny_terminal() {
@@ -375,6 +445,7 @@ mod tests {
                             settings: &settings,
                             rate: 0.0,
                             target: "final.db",
+                            remote: false,
                             cache: "cache.db",
                             progress: None,
                             notice: None,
@@ -399,6 +470,7 @@ mod tests {
                             settings: &settings,
                             rate: 0.0,
                             target: "final.db",
+                            remote: false,
                             cache: "cache.db",
                             progress: None,
                             notice: None,
@@ -465,6 +537,7 @@ mod tests {
                             settings: &settings,
                             rate: 100.0,
                             target: "data/iot-power.db",
+                            remote: false,
                             cache: "data/.iot-power-pending/capture-example/capture.db",
                             progress: None,
                             notice: error,

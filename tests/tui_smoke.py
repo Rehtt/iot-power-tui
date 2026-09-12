@@ -13,7 +13,7 @@ import termios
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "target/debug/iot-power-tui"
+BINARY = Path(os.environ.get("IOT_POWER_BINARY", ROOT / "target/debug/iot-power-tui")).resolve()
 
 
 def run_tui(arguments, actions, timeout=15):
@@ -84,18 +84,21 @@ def main():
             ["--mock", "--db", str(target)],
             [(0.3, b"1]3[2r"), (0.7, b"q"), (1.0, check_unsaved),
              (1.4, check_unsaved), (1.5, b"\x1b"), (1.8, b"s"), (2.2, b"s"),
-             (2.7, b"\x03"), (3.0, b"\r")],
+             (2.7, b"\x03"), (2.9, b"\x1b[A"), (3.0, b"\r"),
+             (3.2, check_unsaved), (3.3, b"q"), (3.5, b"\x1b[B"),
+             (3.6, b"\x1b[A"), (3.8, b"\r")],
         )
         assert code == 0, output[-3000:]
+        assert len(observed) == 3, "Up + Enter did not cancel the exit dialog"
         assert observed[1] > observed[0], "Capture stopped while exit dialog was open"
         sessions = rows(target)
         assert len(sessions) == 2, sessions
         assert all(a == s and a > 0 and o == "complete" and e for a, s, o, e in sessions)
         assert not pending(root)
-        print("PASS charts/confirm/cancel/continued capture/restart/save/Ctrl+C")
+        print("PASS charts/arrows/confirm/cancel/continued capture/restart/save/Ctrl+C")
 
         original_count = sample_count(target)
-        code, output = run_tui(["--mock", "--db", str(target)], [(0.6, b"q"), (0.9, b"n")])
+        code, output = run_tui(["--mock", "--db", str(target)], [(0.6, b"q"), (0.9, b"\x1b[B\r")])
         assert code == 0, output[-2000:]
         assert sample_count(target) == original_count and rows(target) == sessions
         assert not pending(root)

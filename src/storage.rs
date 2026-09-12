@@ -10,18 +10,12 @@ pub struct Store {
     session_id: i64,
 }
 impl Store {
+    pub fn session_id(&self) -> i64 {
+        self.session_id
+    }
     pub fn open(path: &str, info: &SessionInfo) -> Result<Self> {
-        if let Some(parent) = std::path::Path::new(path)
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-        {
-            std::fs::create_dir_all(parent).context("create database directory")?;
-        }
-        let mut conn = Connection::open(path).context("open measurement database")?;
-        conn.busy_timeout(std::time::Duration::from_secs(2))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        let mut conn = open_database(path)?;
         let tx = conn.transaction()?;
-        initialize_schema(&tx)?;
         tx.execute("INSERT INTO sessions(device_id,started_at,transport,calibration,calibration_received_at,timestamp_basis,outcome) VALUES (?1,?2,?3,?4,?2,?5,'incomplete')",params![info.device,info.received.to_rfc3339(),info.transport,info.calibration,if info.transport=="usb-cc" {"estimated: first packet reception, 100 us/sample, packet counter"} else {"source timestamp"}])?;
         let session_id = tx.last_insert_rowid();
         tx.commit()?;
@@ -73,6 +67,10 @@ impl Store {
                 }
             }
         }
+        tx.execute(
+            "UPDATE sessions SET saved_count=saved_count+?2,accepted_count=accepted_count+?2,received_count=received_count+?2+?4,missing_packets=missing_packets+?3,invalid_samples=invalid_samples+?4 WHERE id=?1",
+            params![self.session_id, count, batches.iter().map(|b|b.gaps).sum::<u64>(), batches.iter().map(|b|b.invalid).sum::<u64>()],
+        )?;
         tx.commit().context("commit measurement batch")?;
         Ok(count)
     }
@@ -87,7 +85,24 @@ impl Store {
     }
 }
 
-fn initialize_schema(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+/// Initialize/migrate without creating a capture session.
+pub fn open_database(path: &str) -> Result<Connection> {
+    if let Some(parent) = std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).context("create database directory")?;
+    }
+    let mut conn = Connection::open(path).context("open measurement database")?;
+    conn.busy_timeout(std::time::Duration::from_secs(2))?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    let tx = conn.transaction()?;
+    initialize_schema(&tx)?;
+    tx.commit()?;
+    Ok(conn)
+}
+
+pub(crate) fn initialize_schema(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     tx.execute_batch("CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY,device_id TEXT,started_at TEXT NOT NULL,ended_at TEXT);
         CREATE TABLE IF NOT EXISTS measurements(id INTEGER PRIMARY KEY,session_id INTEGER NOT NULL,ts TEXT NOT NULL,device_id TEXT,voltage_v REAL,current_a REAL,power_w REAL,energy_wh REAL,status TEXT,raw BLOB);")?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;

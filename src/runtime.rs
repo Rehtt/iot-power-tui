@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     #[default]
     Connecting,
@@ -26,6 +26,8 @@ pub enum State {
 #[derive(Clone, Default)]
 pub struct Shared {
     pub state: State,
+    pub session_id: Option<i64>,
+    pub storage_fault: bool,
     pub metrics: Metrics,
     pub history: crate::history::History,
     pub device: Option<String>,
@@ -87,6 +89,7 @@ impl Runtime {
         let writer_cancel = cancel.clone();
         let writer = thread::spawn(move || {
             if let Err(e) = write_loop(rx, &db, &writer_shared, &writer_cancel) {
+                writer_shared.lock().unwrap().storage_fault = true;
                 fault(&writer_shared, &writer_cancel, format!("database: {e:#}"));
             }
             let mut s = writer_shared.lock().unwrap();
@@ -168,7 +171,9 @@ fn write_loop(
             match rx.recv_timeout(Duration::from_millis(250).saturating_sub(last_flush.elapsed())) {
                 Ok(Message::Ready(info)) => {
                     anyhow::ensure!(store.is_none(), "duplicate session initialization");
-                    store = Some(Store::open(db, &info)?);
+                    let opened = Store::open(db, &info)?;
+                    shared.lock().unwrap().session_id = Some(opened.session_id());
+                    store = Some(opened);
                 }
                 Ok(Message::Batch(batch)) => pending.push(batch),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -185,6 +190,7 @@ fn write_loop(
         Ok(())
     })();
     if let Err(e) = &result {
+        shared.lock().unwrap().storage_fault = true;
         fault(shared, cancel, format!("database write failed: {e:#}"));
         // Wait for acquisition to observe cancellation; account for every accepted packet.
         // The failed transaction remains unsaved and the session is explicitly incomplete.

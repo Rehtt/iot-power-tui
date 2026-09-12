@@ -1,5 +1,7 @@
+mod client;
 mod domain;
 mod history;
+mod network;
 mod protocol;
 mod runtime;
 mod source;
@@ -22,11 +24,22 @@ use std::{
 };
 
 #[derive(Parser, Debug)]
-#[command(name="iot-power-tui",about="IoT Power CC USB 终端采集工具",group(ArgGroup::new("source").args(["usb","mock","replay","port","list_devices"]).required(true)))]
+#[command(name="iot-power-tui",about="IoT Power CC USB 终端采集工具",group(ArgGroup::new("source").args(["usb","mock","replay","port","list_devices"]).required(false)))]
+#[command(group(ArgGroup::new("input_or_mode").args(["usb", "mock", "replay", "port", "list_devices", "service", "client"]).required(true).multiple(true)))]
+#[command(group(ArgGroup::new("remote").args(["service", "client"])))]
+#[command(group(ArgGroup::new("usb_mode").args(["usb", "service"]).multiple(true)))]
 struct Args {
     #[arg(long)]
     usb: bool,
-    #[arg(long,requires="usb",conflicts_with_all=["mock","replay","port","list_devices"])]
+    #[arg(long, conflicts_with_all=["client","list_devices"])]
+    service: bool,
+    #[arg(long, conflicts_with_all=["usb","mock","replay","port","device","list_devices","db","baud"])]
+    client: bool,
+    #[arg(long, requires = "remote")]
+    addr: Option<std::net::SocketAddr>,
+    #[arg(long, requires = "client", conflicts_with_all=["source","service","device"], default_value = "./downloads")]
+    download_dir: String,
+    #[arg(long,requires="usb_mode",conflicts_with_all=["mock","replay","port","list_devices"])]
     device: Option<String>,
     #[arg(long)]
     list_devices: bool,
@@ -44,7 +57,8 @@ struct Args {
 }
 impl Args {
     fn source(&self) -> Box<dyn source::DataSource> {
-        if self.usb {
+        if self.usb || (self.service && !self.mock && self.replay.is_none() && self.port.is_none())
+        {
             Box::new(source::usb::UsbSource {
                 serial: self.device.clone(),
             })
@@ -161,9 +175,27 @@ fn begin_operation(
 }
 fn main() -> Result<()> {
     let args = Args::parse();
+    ensure!(
+        args.addr.is_none() || args.service || args.client,
+        "--addr requires --service or --client"
+    );
+    ensure!(
+        args.device.is_none() || args.usb || args.service,
+        "--device requires USB"
+    );
     if args.list_devices {
         return source::usb::list_devices();
     }
+    if args.service {
+        return network::run(&args);
+    }
+    if args.client {
+        return client::run(&args);
+    }
+    ensure!(
+        args.usb || args.mock || args.replay.is_some() || args.port.is_some(),
+        "choose --usb, --mock, --replay, --port, --service or --client"
+    );
     let workspace = workspace::CaptureWorkspace::new(&args.db)?;
     let cache = workspace.database.display().to_string();
     run_tui(&args, workspace).with_context(|| format!("未清理的采集缓存（若存在）：{cache}"))
@@ -230,6 +262,7 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
                     settings: &settings,
                     rate,
                     target: &target_label,
+                    remote: false,
                     cache: &cache_label,
                     progress: operation.as_ref().map(|_| &snapshot),
                     notice: notice.as_deref(),
@@ -306,8 +339,29 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn service_client_cli_modes_and_conflicts() {
+        for arguments in [
+            vec!["app", "--service"],
+            vec!["app", "--service", "--device", "CC"],
+            vec!["app", "--service", "--mock"],
+            vec!["app", "--client", "--addr", "127.0.0.1:8080"],
+            vec!["app", "--client", "--download-dir", "downloads"],
+        ] {
+            assert!(Args::try_parse_from(arguments).is_ok());
+        }
+        for arguments in [
+            vec!["app", "--service", "--client"],
+            vec!["app", "--client", "--db", "capture.db"],
+            vec!["app", "--client", "--mock"],
+            vec!["app", "--mock", "--download-dir", "downloads"],
+            vec!["app", "--service", "--list-devices"],
+        ] {
+            assert!(Args::try_parse_from(&arguments).is_err(), "{arguments:?}");
+        }
+    }
+    #[test]
     fn requires_one_explicit_source_and_usb_for_device_selector() {
-        assert!(Args::try_parse_from(["app"]).is_err());
+        assert!(Args::try_parse_from(["app", "--service"]).is_ok());
         assert!(Args::try_parse_from(["app", "--usb", "--mock"]).is_err());
         assert!(Args::try_parse_from(["app", "--mock", "--device", "CC"]).is_err());
         assert!(Args::try_parse_from(["app", "--usb", "--device", "CC"]).is_ok());
