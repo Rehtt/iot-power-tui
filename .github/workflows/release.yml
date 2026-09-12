@@ -33,6 +33,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-22.04
+            target: i686-unknown-linux-gnu
+          - runner: ubuntu-22.04
+            target: armv7-unknown-linux-gnueabihf
           - runner: macos-15-intel
             target: x86_64-apple-darwin
           - runner: macos-15
@@ -52,6 +56,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes build-essential pkg-config libudev-dev
 
+      - name: Configure Linux 32-bit compiler and test runner
+        if: matrix.target == 'i686-unknown-linux-gnu' || matrix.target == 'armv7-unknown-linux-gnueabihf'
+        run: bash .github/scripts/setup-linux-cross.sh "$TARGET"
+
       - name: Install Rust toolchain
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
@@ -68,7 +76,7 @@ jobs:
       - name: Build release binary
         run: |
           cargo build --release --locked --target "$TARGET"
-          "target/$TARGET/release/iot-power-tui" --help
+          cargo run --release --locked --target "$TARGET" -- --help
           file "target/$TARGET/release/iot-power-tui"
 
       - name: Package binary and documentation
@@ -106,7 +114,7 @@ jobs:
         run: |
           shopt -s nullglob
           archives=(*.tar.gz)
-          test "${#archives[@]}" -eq 4
+          test "${#archives[@]}" -eq 6
           for archive in "${archives[@]}"; do
             tar -tzf "$archive" > /dev/null
           done

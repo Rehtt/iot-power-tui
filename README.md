@@ -184,6 +184,8 @@ JSONL 每行一个测量对象，以下是合成示例：
 | --- | --- | --- |
 | Linux | x86_64 / `x86_64-unknown-linux-gnu` | Ubuntu 22.04 x86_64 |
 | Linux | ARM64 / `aarch64-unknown-linux-gnu` | Ubuntu 22.04 ARM64 |
+| Linux | 32 位 x86 / `i686-unknown-linux-gnu` | Ubuntu 22.04 x86_64 + multilib |
+| Linux | 32 位 ARMv7 / `armv7-unknown-linux-gnueabihf` | Ubuntu 22.04 x86_64 + ARM 交叉编译器 / QEMU |
 | macOS | Intel / `x86_64-apple-darwin` | macOS 15 Intel |
 | macOS | Apple Silicon / `aarch64-apple-darwin` | macOS 15 ARM64 |
 
@@ -194,9 +196,11 @@ git tag -a v0.2.0 -m "Release v0.2.0"
 git push origin v0.2.0
 ```
 
-任何 tag 名都能触发，推荐 `v版本号`。工作流固定使用 Rust 1.93.1 和 `Cargo.lock`；每个原生 runner 执行 fmt、check、test、Clippy、release 编译及 `--help` 验证。ARM64 runner 适用于本项目的 GitHub 公共仓库。
+任何 tag 名都能触发，推荐 `v版本号`。工作流固定使用 Rust 1.93.1 和 `Cargo.lock`；每个目标执行 fmt、check、test、Clippy、release 编译及 `--help` 验证。64 位目标原生构建，i686 使用 multilib 编译并在 x86_64 runner 上运行，ARMv7 使用交叉编译器并通过 QEMU 运行测试与 `--help`。ARM64 runner 适用于本项目的 GitHub 公共仓库。
 
-Release 附件包含四个 `iot-power-tui-<tag>-<target>.tar.gz` 和一个 `SHA256SUMS`。压缩包内含可执行文件、MIT 许可证、README 与协议/API 文档。Linux 版本要求 glibc 2.35 或更新版本及 `libudev.so.1`（例如 Ubuntu 22.04+）；macOS 部署目标为 11.0，产物未做 Apple 签名或公证。
+Release 附件包含六个 `iot-power-tui-<tag>-<target>.tar.gz` 和一个 `SHA256SUMS`。压缩包内含可执行文件、MIT 许可证、README 与协议/API 文档。Linux 版本要求 glibc 2.35 或更新版本（例如 Ubuntu 22.04+）；64 位版本还需要 `libudev.so.1`，32 位版本使用内置 libusb 的 netlink 后端；macOS 部署目标为 11.0，产物未做 Apple 签名或公证。
+
+可用 `uname -m` 选择 Linux 架构：`x86_64` 对应 x86_64，`aarch64` 对应 ARM64，`i386` / `i686` 对应 i686（CPU 需支持 SSE2），`armv7l` 对应 ARMv7 **hard-float**。ARMv7 包不适用于 ARMv6、ARM soft-float 或 MIPS 设备；QEMU 测试不替代 32 位 USB 实机验证。
 
 下载对应架构的压缩包后，可用 `sha256sum --ignore-missing -c SHA256SUMS`（Linux）校验，再解压执行包内的 `./iot-power-tui --help`。macOS 可用 `shasum -a 256 <压缩包>` 与校验文件比对。
 
@@ -235,7 +239,7 @@ python3 tests/service_transfer.py  # 大文件、下载互斥、取消与异常
 
 ## 当前状态与边界
 
-项目处于 MVP 阶段，已验证 Linux x86_64；macOS 和 Windows 尚未完成构建及实机验证。
+项目处于 MVP 阶段。Linux x86_64/ARM64 与 macOS Intel/Apple Silicon 已通过 v0.0.1 云端构建，USB 实机验证目前仅覆盖 Linux x86_64。新增的 Linux 32 位目标尚待云端构建及实机验证；Windows 尚未验证。
 
 - Rust 测试覆盖协议、图表、持久化和会话快照；Unix PTY 测试覆盖本地保存流程与远程客户端。
 - 新版 TUI 在 Linux 上完成约 66 秒 CC 实机采集：660,800 个样本，零丢包，暂存与最终入库计数一致，采集进程内存约 11.7–11.8 MB。
