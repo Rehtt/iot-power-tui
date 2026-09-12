@@ -176,6 +176,32 @@ JSONL 每行一个测量对象，以下是合成示例：
 
 单行上限 1 MiB。回放按照存储能力读取，不模拟原始时间间隔。字段定义见 [Measurement](src/domain.rs)。
 
+## Tag 自动构建与发布
+
+推送新 tag 后，GitHub Actions 的 `Release binaries` 工作流会构建并测试以下版本，全部成功后创建 GitHub Release：
+
+| 平台 | 架构 / Rust target | 构建 runner |
+| --- | --- | --- |
+| Linux | x86_64 / `x86_64-unknown-linux-gnu` | Ubuntu 22.04 x86_64 |
+| Linux | ARM64 / `aarch64-unknown-linux-gnu` | Ubuntu 22.04 ARM64 |
+| macOS | Intel / `x86_64-apple-darwin` | macOS 15 Intel |
+| macOS | Apple Silicon / `aarch64-apple-darwin` | macOS 15 ARM64 |
+
+```bash
+# 先将包含工作流的代码提交并推送到 GitHub；然后创建并推送版本 tag
+# 将 v0.2.0 替换为本次版本号
+git tag -a v0.2.0 -m "Release v0.2.0"
+git push origin v0.2.0
+```
+
+任何 tag 名都能触发，推荐 `v版本号`。工作流固定使用 Rust 1.93.1 和 `Cargo.lock`；每个原生 runner 执行 fmt、check、test、Clippy、release 编译及 `--help` 验证。ARM64 runner 适用于本项目的 GitHub 公共仓库。
+
+Release 附件包含四个 `iot-power-tui-<tag>-<target>.tar.gz` 和一个 `SHA256SUMS`。压缩包内含可执行文件、MIT 许可证、README 与协议/API 文档。Linux 版本要求 glibc 2.35 或更新版本及 `libudev.so.1`（例如 Ubuntu 22.04+）；macOS 部署目标为 11.0，产物未做 Apple 签名或公证。
+
+下载对应架构的压缩包后，可用 `sha256sum --ignore-missing -c SHA256SUMS`（Linux）校验，再解压执行包内的 `./iot-power-tui --help`。macOS 可用 `shasum -a 256 <压缩包>` 与校验文件比对。
+
+工作流只在发布 job 中授予 `contents: write`，使用内置 `GITHUB_TOKEN`，无需额外 secret。失败时可在 Actions 中重新运行该 tag 的工作流；上传完成前保留 draft，重跑会补齐并覆盖同名附件。tag 构建定义见 [release.yml](.github/workflows/release.yml)。
+
 ## 开发与贡献
 
 欢迎提交问题报告、协议证据、测试和改进。问题报告请附上操作系统、Rust 版本、设备/固件信息、复现步骤及错误提示；避免公开敏感采集记录。

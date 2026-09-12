@@ -1,0 +1,125 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - '**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.93.1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    env:
+      TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential pkg-config libudev-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add "$TARGET"
+
+      - name: Check and test on the target architecture
+        run: |
+          cargo fmt -- --check
+          cargo check --locked --target "$TARGET"
+          cargo test --locked --target "$TARGET"
+          cargo clippy --locked --target "$TARGET" --all-targets -- -D warnings
+
+      - name: Build release binary
+        run: |
+          cargo build --release --locked --target "$TARGET"
+          "target/$TARGET/release/iot-power-tui" --help
+          file "target/$TARGET/release/iot-power-tui"
+
+      - name: Package binary and documentation
+        run: bash .github/scripts/package-release.sh "$TARGET" "$GITHUB_REF_NAME" "target/$TARGET/release/iot-power-tui"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download all platform archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: dist
+
+      - name: Check assets and generate checksums
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          archives=(*.tar.gz)
+          test "${#archives[@]}" -eq 4
+          for archive in "${archives[@]}"; do
+            tar -tzf "$archive" > /dev/null
+          done
+          sha256sum "${archives[@]}" > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Publish archives and checksums
+        run: |
+          if gh release view -- "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload --clobber -- "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS
+          else
+            gh release create --verify-tag --draft --generate-notes --title "$GITHUB_REF_NAME" -- "$GITHUB_REF_NAME"
+            gh release upload --clobber -- "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS
+          fi
+          # Publish only after all assets were uploaded; also recovers a failed draft upload.
+          gh release edit --draft=false -- "$GITHUB_REF_NAME"
