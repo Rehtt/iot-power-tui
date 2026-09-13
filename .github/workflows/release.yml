@@ -70,13 +70,21 @@ jobs:
         run: |
           cargo fmt -- --check
           cargo check --locked --target "$TARGET"
-          cargo test --locked --target "$TARGET"
+          # Cross-compiled test binaries cannot be executed without a target
+          # runner. Still compile them so test-only code is checked.
+          if [[ "$TARGET" == "x86_64-unknown-linux-gnu" || "$TARGET" == "x86_64-apple-darwin" || "$TARGET" == "aarch64-apple-darwin" ]]; then
+            cargo test --locked --target "$TARGET"
+          else
+            cargo test --locked --target "$TARGET" --no-run
+          fi
           cargo clippy --locked --target "$TARGET" --all-targets -- -D warnings
 
       - name: Build release binary
         run: |
           cargo build --release --locked --target "$TARGET"
-          cargo run --release --locked --target "$TARGET" -- --help
+          if [[ "$TARGET" == "x86_64-unknown-linux-gnu" || "$TARGET" == "x86_64-apple-darwin" || "$TARGET" == "aarch64-apple-darwin" ]]; then
+            cargo run --release --locked --target "$TARGET" -- --help
+          fi
           file "target/$TARGET/release/iot-power-tui"
 
       - name: Package binary and documentation
