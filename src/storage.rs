@@ -346,6 +346,8 @@ pub(crate) fn initialize_schema(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     }
     tx.execute_batch("CREATE TABLE IF NOT EXISTS frames(id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id), packet_id INTEGER, received_at TEXT NOT NULL, raw BLOB NOT NULL, missing_before INTEGER NOT NULL, invalid_samples INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS measurements_session ON measurements(session_id);
+        CREATE INDEX IF NOT EXISTS measurements_frame ON measurements(frame_id);
+        CREATE INDEX IF NOT EXISTS measurements_end_frame ON measurements(end_frame_id);
         CREATE INDEX IF NOT EXISTS frames_session ON frames(session_id);
         CREATE UNIQUE INDEX IF NOT EXISTS frames_sequence ON frames(session_id,capture_sequence); PRAGMA user_version=2;")?;
     if version < 2 {
@@ -492,13 +494,20 @@ pub fn update_session_name(path: &std::path::Path, id: i64, name: &str) -> Resul
 }
 
 pub fn delete_session(path: &std::path::Path, id: i64) -> Result<()> {
-    let mut conn = Connection::open(path)?;
-    conn.execute_batch("PRAGMA foreign_keys=ON")?;
-    let tx = conn.transaction()?;
-    tx.execute("DELETE FROM measurements WHERE session_id=?1", [id])?;
-    tx.execute("DELETE FROM frames WHERE session_id=?1", [id])?;
+    let mut conn = open_database(path.to_str().context("non-UTF8 database path")?)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .context("begin session deletion")?;
+    let exists: u64 = tx.query_row("SELECT count(*) FROM sessions WHERE id=?1", [id], |r| r.get(0))?;
+    ensure!(exists == 1, "session not found");
+    // The frame_id/end_frame_id indexes are created by initialize_schema. They
+    // make SQLite's foreign-key checks during frame deletion logarithmic.
+    tx.execute("DELETE FROM measurements WHERE session_id=?1", [id])
+        .context("delete session measurements")?;
+    tx.execute("DELETE FROM frames WHERE session_id=?1", [id])
+        .context("delete session frames")?;
     ensure!(tx.execute("DELETE FROM sessions WHERE id=?1", [id])? == 1, "session not found");
-    tx.commit()?;
+    tx.commit().context("commit session deletion")?;
     Ok(())
 }
 

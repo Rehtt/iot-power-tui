@@ -284,3 +284,4 @@ Service 提供 `POST /api/v1/sessions/{id}/rotate`，请求体为 `{"action":"sa
 - 实时界面中的“记录时长”是当前会话采集经过时间；“累计写入”是成功提交到 SQLite 的数据字节数，缓存占用另行显示。
 - Service 历史接口：`GET /api/v1/sessions/{id}/history?points=600`，`points` 范围为 1–2000，可附带 `from`、`to` RFC3339 时间。
 - Service 数值明细：`GET /api/v1/sessions/{id}/measurements?before=<id>`，每页最多 100 行；删除会话使用 `DELETE /api/v1/sessions/{id}`，活动会话会返回 `409`。
+- 历史列表按 `d` 打开删除确认弹窗；确认后界面显示删除进度，成功后刷新列表，失败时保留弹窗并显示错误，可取消或重试。

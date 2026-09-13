@@ -150,18 +150,20 @@ pub fn browse(paths: Vec<std::path::PathBuf>) -> Result<()> {
             let conn = crate::network::read_database(&path)?;
             let cols = columns(&conn,"sessions")?;
             let name = if cols.iter().any(|c|c=="name") {"name"} else {"''"};
-            let mut stmt = conn.prepare(&format!("SELECT id,{name},started_at,ended_at FROM sessions ORDER BY id DESC LIMIT 1000"))?;
-            for row in stmt.query_map([], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?)))? {
-                let (id,name,start,end) = row?;
+            let mut stmt = conn.prepare(&format!("SELECT id,{name},started_at,ended_at,(SELECT count(*) FROM measurements WHERE session_id=sessions.id) FROM sessions ORDER BY id DESC LIMIT 1000"))?;
+            for row in stmt.query_map([], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,u64>(4)?)))? {
+                let (id,name,start,end,count) = row?;
                 let label = if name.is_empty() {crate::storage::time_range_name(&start,end.as_deref().unwrap_or("采集中，仅已落盘数据"))} else {name};
-                rows.push((path.clone(),id,label));
+                rows.push((path.clone(),id,label,count));
             }
             Ok(())
         })();
         if let Err(e) = result { notice = format!("{}: {e:#}",path.display()); }
     }
     let mut selection = 0usize;
-    let mut confirm_delete = false;
+    let mut delete_prompt: Option<crate::ui::DeletePrompt> = None;
+    let mut delete_target: Option<(std::path::PathBuf, i64, String, u64)> = None;
+    let mut delete_task: Option<std::thread::JoinHandle<Result<()>>> = None;
     let mut metric = 1;
     let mut response = None::<Response>;
     let mut task: Option<std::thread::JoinHandle<Result<Response>>> = None;
@@ -174,24 +176,48 @@ pub fn browse(paths: Vec<std::path::PathBuf>) -> Result<()> {
                 Err(_) => notice="历史查询线程失败".into(),
             }
         }
+        if delete_task.as_ref().is_some_and(|h| h.is_finished()) {
+            let target = delete_target.clone();
+            let result = delete_task.take().unwrap().join().map_err(|_| anyhow::anyhow!("删除线程失败"))?;
+            match result {
+                Ok(()) => {
+                    if let Some((_, id, _, _)) = target {
+                        rows.retain(|row| row.1 != id);
+                        selection = selection.min(rows.len().saturating_sub(1));
+                    }
+                    delete_prompt = None;
+                    delete_target = None;
+                    notice = "删除成功，历史列表已更新".into();
+                }
+                Err(e) => {
+                    notice = format!("删除失败：{e:#}");
+                    if let Some(prompt) = delete_prompt.as_mut() {
+                        prompt.busy = false;
+                        prompt.error = Some(notice.clone());
+                    }
+                }
+            }
+        }
         terminal.draw(|f| {
             if let Some(data) = &response {render(f,data,metric);} else {
                 let visible = f.area().height.saturating_sub(5) as usize;
                 let offset = selection.saturating_sub(visible.saturating_sub(1));
                 let mut text = format!("↑/↓ 选择 Enter 查看 d 删除 Esc 返回 · {}\n",notice);
-                if confirm_delete { text.push_str("确认删除此会话？再次按 Enter 确认，Esc 取消。\n"); }
-                for (index,(path,id,label)) in rows.iter().enumerate().skip(offset).take(visible) {
-                    text.push_str(&format!("{} #{} {} [{}]\n",if index==selection {">"} else {" "},id,label,path.display()));
+                for (index,(path,id,label,count)) in rows.iter().enumerate().skip(offset).take(visible) {
+                    text.push_str(&format!("{} #{} {} · {} 条记录 [{}]\n",if index==selection {">"} else {" "},id,label,count,path.display()));
                 }
                 f.render_widget(Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("历史会话")),f.area());
+            }
+            if let (Some(prompt), Some((_,id,name,count))) = (&delete_prompt, &delete_target) {
+                prompt.render(f,*id,name,*count);
             }
         })?;
         if !event::poll(std::time::Duration::from_millis(100))? {continue;}
         let Event::Key(key) = event::read()? else {continue};
         if key.kind != KeyEventKind::Press {continue;}
-        if task.is_none() {
+        if task.is_none() && delete_task.is_none() {
             if let Some(query)=response.as_ref().and_then(|r|navigate(r,key.code)) {
-                if let Some((path,id,_))=rows.get(selection) {
+                if let Some((path,id,_,_))=rows.get(selection) {
                     let (path,id)=(path.clone(),*id);
                     cancel=std::sync::Arc::new(AtomicBool::new(false));
                     let token=cancel.clone();
@@ -200,16 +226,35 @@ pub fn browse(paths: Vec<std::path::PathBuf>) -> Result<()> {
                 continue;
             }
         }
+        if let Some(prompt) = delete_prompt.as_mut() {
+            if let Some(action) = prompt.key(key) {
+                match action {
+                    crate::ui::DeleteChoice::Cancel => { delete_prompt=None; delete_target=None; }
+                    crate::ui::DeleteChoice::Confirm => {
+                        if let Some((path,id,_,_))=delete_target.clone() {
+                            prompt.busy=true;
+                            notice=format!("正在删除会话 #{id}…");
+                            delete_task=Some(std::thread::spawn(move || {
+                                let conn=crate::network::read_database(&path)?;
+                                let ended: Option<String>=conn.query_row("SELECT ended_at FROM sessions WHERE id=?1",[id],|r|r.get(0))?;
+                                anyhow::ensure!(ended.is_some(),"活动会话不可删除，请先停止采集");
+                                drop(conn);
+                                crate::storage::delete_session(&path,id)
+                            }));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         match key.code {
-            KeyCode::Char('d') if response.is_none() => { confirm_delete = true; }
-            KeyCode::Enter if response.is_none() && confirm_delete => {
-                if let Some((path,id,_))=rows.get(selection) {
-                    crate::storage::delete_session(path,*id)?;
-                    rows.remove(selection); selection=selection.min(rows.len().saturating_sub(1)); confirm_delete=false; notice="会话已删除".into();
+            KeyCode::Char('d') if response.is_none() => {
+                if let Some(row)=rows.get(selection) {
+                    delete_target=Some(row.clone());
+                    delete_prompt=Some(crate::ui::DeletePrompt::new());
                 }
             }
             KeyCode::Esc => {
-                if confirm_delete { confirm_delete=false; continue; }
                 cancel.store(true,Ordering::Relaxed);
                 // Wait only for the cancelled read worker; it checks cancellation per row.
                 if let Some(h)=task.take() {let _=h.join();}
@@ -220,7 +265,7 @@ pub fn browse(paths: Vec<std::path::PathBuf>) -> Result<()> {
             KeyCode::Down if response.is_none() => selection=(selection+1).min(rows.len().saturating_sub(1)),
             KeyCode::Char(c @ '1'..='3') => metric=c as usize-'1' as usize,
             KeyCode::Enter | KeyCode::Char('r') if task.is_none() => {
-                if let Some((path,id,_))=rows.get(selection) {
+                if let Some((path,id,_,_))=rows.get(selection) {
                     let (path,id)=(path.clone(),*id);
                     cancel=std::sync::Arc::new(AtomicBool::new(false));
                     let token=cancel.clone();

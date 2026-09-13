@@ -32,7 +32,7 @@ struct Remote {
     downloading: bool,
     history_data: Option<crate::archive::Response>,
     measurement_rows: Vec<serde_json::Value>,
-    delete_confirm: Option<i64>,
+    delete_status: Option<bool>,
 }
 #[derive(Clone)]
 enum Command {
@@ -186,13 +186,25 @@ pub fn run(args: &Args) -> Result<()> {
                 Err(_) => continue,
             };
             let configuring=matches!(command,Command::ApplyConfig(..) | Command::Rotate(..) | Command::Delete(..) | Command::Measurements(..));
+            let deleting=matches!(command,Command::Delete(..));
             let downloading = matches!(command,Command::Download(_));
             let result = (|| -> Result<String> {
                 match command {
                     Command::Measurements(id, before) => {
                         let mut req=http.get(format!("{url}/api/v1/sessions/{id}/measurements")); if let Some(v)=before {req=req.query(&[("before",v)]);} let rows:Vec<serde_json::Value>=req.send()?.error_for_status()?.json()?; data.lock().unwrap().measurement_rows=rows; Ok("已加载数值明细".into())
                     }
-                    Command::Delete(id) => { http.delete(format!("{url}/api/v1/sessions/{id}")).send()?.error_for_status()?; data.lock().unwrap().sessions.retain(|s|s.id!=id); Ok("会话已删除".into()) }
+                    Command::Delete(id) => {
+                        // Deleting a large session may legitimately take longer
+                        // than the short live-status request timeout.
+                        let response=http
+                            .delete(format!("{url}/api/v1/sessions/{id}"))
+                            .timeout(Duration::from_secs(300))
+                            .send()?;
+                        let status=response.status();
+                        ensure!(status.is_success(),"删除会话失败：{} {}",status,response.text()?);
+                        data.lock().unwrap().sessions.retain(|s|s.id!=id);
+                        Ok("会话已删除".into())
+                    }
                     Command::History(id, query) => {
                         let response: crate::archive::Response = http.get(format!("{url}/api/v1/sessions/{id}/history")).query(&query).send()?.error_for_status()?.json()?;
                         ensure!(response.points.len() <= 2000,"oversized history response");
@@ -263,6 +275,7 @@ pub fn run(args: &Args) -> Result<()> {
             let mut remote = data.lock().unwrap();
             if downloading { remote.downloading = false; }
             if configuring {remote.config_busy=false;}
+            if deleting { remote.delete_status=Some(result.is_ok()); }
             remote.message = match result {
                 Ok(s) => s,
                 Err(e) => format!("操作失败：{e:#}"),
@@ -276,9 +289,24 @@ pub fn run(args: &Args) -> Result<()> {
     let mut selection = 0usize;
     let mut editor: Option<ui::ConfigEditor> = None;
     let mut session_prompt: Option<(i64, ui::SessionPrompt)> = None;
+    let mut delete_dialog: Option<(i64, String, u64, ui::DeletePrompt)> = None;
     let mut editor_revision = 0;
     let mut waiting_config = false;
     loop {
+        let delete_result = if delete_dialog.as_ref().is_some_and(|(_, _, _, prompt)| prompt.busy) {
+            shared.lock().unwrap().delete_status.take()
+        } else {
+            None
+        };
+        if let Some(success) = delete_result {
+            if success {
+                delete_dialog = None;
+                shared.lock().unwrap().message = "删除成功，历史列表已更新".into();
+            } else if let Some((_, _, _, prompt)) = delete_dialog.as_mut() {
+                prompt.busy = false;
+                prompt.error = Some(shared.lock().unwrap().message.clone());
+            }
+        }
         let frame_deadline = Instant::now() + Duration::from_millis(100);
         {
             let data = shared.lock().unwrap().clone();
@@ -369,6 +397,9 @@ pub fn run(args: &Args) -> Result<()> {
                 if let Some(edit) = &editor {
                     edit.render(f);
                 }
+                if let Some((id, name, records, prompt)) = &delete_dialog {
+                    prompt.render(f, *id, name, *records);
+                }
             })?;
         }
         if !event::poll(frame_deadline.saturating_duration_since(Instant::now()))? {
@@ -378,6 +409,27 @@ pub fn run(args: &Args) -> Result<()> {
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        if let Some((id, _, _, prompt)) = delete_dialog.as_mut() {
+            if let Some(choice) = prompt.key(key) {
+                match choice {
+                    ui::DeleteChoice::Cancel => delete_dialog = None,
+                    ui::DeleteChoice::Confirm => {
+                        prompt.busy = true;
+                        prompt.error = None;
+                        let mut remote = shared.lock().unwrap();
+                        remote.delete_status = None;
+                        if !remote.config_busy && tx.try_send(Command::Delete(*id)).is_ok() {
+                            remote.config_busy = true;
+                            remote.message = format!("正在删除会话 #{id}…");
+                        } else {
+                            prompt.busy = false;
+                            prompt.error = Some("操作队列忙，请稍后重试".into());
+                        }
+                    }
+                }
+            }
             continue;
         }
         if let Some((id, prompt)) = &mut session_prompt {
@@ -422,12 +474,15 @@ pub fn run(args: &Args) -> Result<()> {
         }
         let action = settings.key(key);
         if history && key.code == KeyCode::Char('d') {
-            let mut d=shared.lock().unwrap(); d.delete_confirm=d.sessions.get(selection).map(|s|s.id); d.message="再次按 d 确认删除，Esc 取消".into(); continue;
+            let data = shared.lock().unwrap();
+            if !data.config_busy {
+                if let Some(session) = data.sessions.get(selection) {
+                    let name = if session.name.is_empty() { format!("{} - {}", session.started_at, session.ended_at.as_deref().unwrap_or("采集中")) } else { session.name.clone() };
+                    delete_dialog = Some((session.id, name, session.saved, ui::DeletePrompt::new()));
+                }
+            }
+            continue;
         }
-        if history && key.code == KeyCode::Enter && shared.lock().unwrap().delete_confirm.is_some() {
-            let mut d=shared.lock().unwrap(); let id=d.delete_confirm.take().unwrap(); d.config_busy=true; drop(d); let _=tx.try_send(Command::Delete(id)); continue;
-        }
-        if key.code == KeyCode::Esc { shared.lock().unwrap().delete_confirm=None; }
         if action == ui::Action::RequestExit {
             break;
         }
