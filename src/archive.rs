@@ -109,7 +109,9 @@ pub fn read(path: &Path, id: i64, query: &Query, cancel: &AtomicBool) -> Result<
     }
     if stats.samples == 0 { stats.maximum_voltage_v = 0.0; stats.maximum_current_a = 0.0; stats.maximum_power_w = 0.0; }
     let energy_field = if names.iter().any(|s| s == "energy_wh") { "energy_wh" } else { "0" };
-    stats.energy_wh = conn.query_row(&format!("SELECT coalesce(({energy_field}) - (SELECT {energy_field} FROM measurements WHERE session_id=?1 ORDER BY id LIMIT 1),0) FROM measurements WHERE session_id=?1 ORDER BY id DESC LIMIT 1"), [id], |r| r.get::<_, f64>(0)).unwrap_or(0.0_f64).max(0.0);
+    let start_text = chrono::DateTime::from_timestamp_micros(start).unwrap().to_rfc3339();
+    let end_text = chrono::DateTime::from_timestamp_micros(end).unwrap().to_rfc3339();
+    stats.energy_wh = conn.query_row(&format!("SELECT coalesce((SELECT {energy_field} FROM measurements WHERE session_id=?1 AND ts<=?3 ORDER BY id DESC LIMIT 1) - (SELECT {energy_field} FROM measurements WHERE session_id=?1 AND ts>=?2 ORDER BY id LIMIT 1),0)"), rusqlite::params![id, start_text, end_text], |r| r.get::<_, f64>(0)).unwrap_or(0.0_f64).max(0.0);
     let stamp = |us| chrono::DateTime::from_timestamp_micros(us).unwrap().to_rfc3339();
     Ok(Response{session_id:id,from:Some(stamp(start)),to:Some(stamp(end)),points,statistics:stats})
 }
@@ -167,9 +169,14 @@ pub fn render(f: &mut ratatui::Frame<'_>, response: &Response, metric: usize) {
     sets.push(Dataset::default().data(&low).style(Color::LightBlue).marker(Marker::Braille));
     sets.push(Dataset::default().data(&high).style(Color::LightBlue).marker(Marker::Braille));
     let unit = ["V","A","W"][metric];
+    let seconds = ((end-origin) as f64 / 1e6).max(1e-6);
+    let xlabels = [0., seconds * 0.25, seconds * 0.5, seconds * 0.75, seconds]
+        .map(|v| format!("{v:.2}s"));
+    let ylabels = [0., 0.25, 0.5, 0.75, 1.]
+        .map(|v| format!("{:.4}", bounds[0] + (bounds[1]-bounds[0])*v));
     f.render_widget(Chart::new(sets).block(Block::default().borders(Borders::ALL).title(format!("历史会话 #{} · {} · {} 桶",response.session_id,unit,response.points.len())))
-        .x_axis(Axis::default().bounds([0.,((end-origin) as f64/1e6).max(1e-6)]).title("相对时间 / s"))
-        .y_axis(Axis::default().bounds(bounds).labels([format!("{:.4}",bounds[0]),format!("{:.4}",bounds[1])])),rows[0]);
+        .x_axis(Axis::default().bounds([0.,seconds]).labels(xlabels).title("相对时间"))
+        .y_axis(Axis::default().bounds(bounds).labels(ylabels).title(unit)),rows[0]);
     let s = &response.statistics;
     f.render_widget(Paragraph::new(format!("{} — {}\n平均电压 {:.4} V · 最高电压 {:.4} V · 平均电流 {:.4} A · 最高电流 {:.4} A\n平均功率 {:.4} W · 最高功率 {:.4} W · 总时长 {:.3} s · 总计电能 {:.6} Wh\n1/2/3 指标 · [/] 缩放 · ←/→ 移动 · Home 全部 · Esc 返回 · r 刷新",response.from.as_deref().unwrap_or("空会话"),response.to.as_deref().unwrap_or(""),s.average_voltage_v,s.maximum_voltage_v,s.average_current_a,s.maximum_current_a,s.average_power_w,s.maximum_power_w,s.duration_secs,s.energy_wh)),rows[1]);
 }
