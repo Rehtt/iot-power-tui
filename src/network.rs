@@ -158,6 +158,10 @@ pub struct Session {
     #[serde(default)]
     pub name: String,
 }
+#[derive(Serialize)]
+struct DeleteResponse { session_id: i64, measurements: u64, frames: u64 }
+#[derive(Serialize)]
+struct MeasurementRow { id:i64, ts:String, voltage_v:Option<f64>, current_a:Option<f64>, power_w:Option<f64>, energy_wh:Option<f64>, samples:u64, partial:bool }
 #[derive(Default, Deserialize)]
 struct Page {
     before: Option<i64>,
@@ -274,6 +278,28 @@ async fn sessions(
         let conn = read_database(&api.db)?;
         let mut stmt=conn.prepare("SELECT id,device_id,started_at,ended_at,saved_count,outcome,name FROM sessions WHERE id<?1 ORDER BY id DESC LIMIT 50")?;
         let rows=stmt.query_map([page.before.unwrap_or(i64::MAX)],|r|Ok(Session{id:r.get(0)?,device:r.get(1)?,started_at:r.get(2)?,ended_at:r.get(3)?,saved:r.get(4)?,outcome:r.get(5)?,name:r.get::<_,Option<String>>(6)?.unwrap_or_default()}))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Json(rows))
+    }).await.map_err(internal)?.map_err(internal)
+}
+async fn delete_session_api(WebState(api): WebState<Api>, Path(id): Path<i64>) -> Result<Json<DeleteResponse>, ApiError> {
+    if api.live.lock().unwrap().session_id == Some(id) { return Err((StatusCode::CONFLICT, "active session cannot be deleted".into())); }
+    tokio::task::spawn_blocking(move || -> Result<Json<DeleteResponse>> {
+        let conn = crate::network::read_database(&api.db)?;
+        let measurements: u64 = conn.query_row("SELECT count(*) FROM measurements WHERE session_id=?1", [id], |r|r.get(0))?;
+        let frames: u64 = conn.query_row("SELECT count(*) FROM frames WHERE session_id=?1", [id], |r|r.get(0))?;
+        let exists: u64 = conn.query_row("SELECT count(*) FROM sessions WHERE id=?1", [id], |r|r.get(0))?;
+        anyhow::ensure!(exists == 1, "session not found");
+        drop(conn);
+        crate::storage::delete_session(&api.db,id)?;
+        Ok(Json(DeleteResponse{session_id:id,measurements,frames}))
+    }).await.map_err(internal)?.map_err(|e| if e.to_string()=="session not found" {(StatusCode::NOT_FOUND,e.to_string())} else {internal(e)})
+}
+async fn measurements_api(WebState(api): WebState<Api>, Path(id): Path<i64>, Query(page): Query<Page>) -> Result<Json<Vec<MeasurementRow>>, ApiError> {
+    let before=page.before.unwrap_or(i64::MAX);
+    tokio::task::spawn_blocking(move || -> Result<Json<Vec<MeasurementRow>>> {
+        let conn=read_database(&api.db)?;
+        let mut stmt=conn.prepare("SELECT id,ts,voltage_v,current_a,power_w,energy_wh,coalesce(source_count,1),coalesce(partial,0) FROM measurements WHERE session_id=?1 AND id<?2 ORDER BY id DESC LIMIT 100")?;
+        let rows=stmt.query_map(rusqlite::params![id,before],|r|Ok(MeasurementRow{id:r.get(0)?,ts:r.get(1)?,voltage_v:r.get(2)?,current_a:r.get(3)?,power_w:r.get(4)?,energy_wh:r.get(5)?,samples:r.get::<_,i64>(6)?.max(1) as u64,partial:r.get::<_,i64>(7)?!=0}))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Json(rows))
     }).await.map_err(internal)?.map_err(internal)
 }
@@ -817,7 +843,9 @@ pub fn run(args: &Args) -> Result<()> {
             .route("/api/v1/config", get(get_config).put(put_config))
             .route("/api/v1/status", get(status))
             .route("/api/v1/sessions", get(sessions))
+            .route("/api/v1/sessions/{id}", axum::routing::delete(delete_session_api))
             .route("/api/v1/sessions/{id}/history", get(session_history))
+            .route("/api/v1/sessions/{id}/measurements", get(measurements_api))
             .route("/api/v1/sessions/{id}/rotate", axum::routing::post(rotate))
             .route("/api/v1/sessions/{id}/download", get(download))
             .with_state(api);

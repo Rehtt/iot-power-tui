@@ -161,6 +161,7 @@ pub fn browse(paths: Vec<std::path::PathBuf>) -> Result<()> {
         if let Err(e) = result { notice = format!("{}: {e:#}",path.display()); }
     }
     let mut selection = 0usize;
+    let mut confirm_delete = false;
     let mut metric = 1;
     let mut response = None::<Response>;
     let mut task: Option<std::thread::JoinHandle<Result<Response>>> = None;
@@ -177,7 +178,8 @@ pub fn browse(paths: Vec<std::path::PathBuf>) -> Result<()> {
             if let Some(data) = &response {render(f,data,metric);} else {
                 let visible = f.area().height.saturating_sub(5) as usize;
                 let offset = selection.saturating_sub(visible.saturating_sub(1));
-                let mut text = format!("↑/↓ 选择 Enter 查看 Esc 返回 · {}\n",notice);
+                let mut text = format!("↑/↓ 选择 Enter 查看 d 删除 Esc 返回 · {}\n",notice);
+                if confirm_delete { text.push_str("确认删除此会话？再次按 Enter 确认，Esc 取消。\n"); }
                 for (index,(path,id,label)) in rows.iter().enumerate().skip(offset).take(visible) {
                     text.push_str(&format!("{} #{} {} [{}]\n",if index==selection {">"} else {" "},id,label,path.display()));
                 }
@@ -199,7 +201,15 @@ pub fn browse(paths: Vec<std::path::PathBuf>) -> Result<()> {
             }
         }
         match key.code {
+            KeyCode::Char('d') if response.is_none() => { confirm_delete = true; }
+            KeyCode::Enter if response.is_none() && confirm_delete => {
+                if let Some((path,id,_))=rows.get(selection) {
+                    crate::storage::delete_session(path,*id)?;
+                    rows.remove(selection); selection=selection.min(rows.len().saturating_sub(1)); confirm_delete=false; notice="会话已删除".into();
+                }
+            }
             KeyCode::Esc => {
+                if confirm_delete { confirm_delete=false; continue; }
                 cancel.store(true,Ordering::Relaxed);
                 // Wait only for the cancelled read worker; it checks cancellation per row.
                 if let Some(h)=task.take() {let _=h.join();}

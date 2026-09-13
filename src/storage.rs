@@ -512,6 +512,19 @@ mod tests {
         assert!(super::validate_session_name(&"x".repeat(129)).is_err());
     }
     #[test]
+    fn delete_session_removes_children_and_preserves_other_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("delete.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE sessions(id INTEGER PRIMARY KEY); CREATE TABLE frames(id INTEGER PRIMARY KEY,session_id INTEGER REFERENCES sessions(id)); CREATE TABLE measurements(id INTEGER PRIMARY KEY,session_id INTEGER); INSERT INTO sessions VALUES(1),(2); INSERT INTO frames VALUES(10,1),(20,2); INSERT INTO measurements VALUES(11,1),(21,2);").unwrap();
+        drop(conn);
+        super::delete_session(&path, 1).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(conn.query_row("SELECT count(*) FROM sessions", [], |r|r.get::<_,i64>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT count(*) FROM frames WHERE session_id=1", [], |r|r.get::<_,i64>(0)).unwrap(), 0);
+        assert_eq!(conn.query_row("SELECT count(*) FROM measurements WHERE session_id=2", [], |r|r.get::<_,i64>(0)).unwrap(), 1);
+    }
+    #[test]
     #[ignore = "manual hardware throughput benchmark; synthetic data only"]
     fn profile_recording_stages() {
         use crate::recording::{tests::batch, Resampler};

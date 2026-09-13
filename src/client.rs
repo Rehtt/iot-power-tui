@@ -31,11 +31,15 @@ struct Remote {
     message: String,
     downloading: bool,
     history_data: Option<crate::archive::Response>,
+    measurement_rows: Vec<serde_json::Value>,
+    delete_confirm: Option<i64>,
 }
 #[derive(Clone)]
 enum Command {
     Sessions(Option<i64>),
     History(i64, crate::archive::Query),
+    Measurements(i64, Option<i64>),
+    Delete(i64),
     Download(i64),
     Refresh,
     Rotate(i64, bool, String),
@@ -181,10 +185,14 @@ pub fn run(args: &Args) -> Result<()> {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            let configuring=matches!(command,Command::ApplyConfig(..) | Command::Rotate(..));
+            let configuring=matches!(command,Command::ApplyConfig(..) | Command::Rotate(..) | Command::Delete(..) | Command::Measurements(..));
             let downloading = matches!(command,Command::Download(_));
             let result = (|| -> Result<String> {
                 match command {
+                    Command::Measurements(id, before) => {
+                        let mut req=http.get(format!("{url}/api/v1/sessions/{id}/measurements")); if let Some(v)=before {req=req.query(&[("before",v)]);} let rows:Vec<serde_json::Value>=req.send()?.error_for_status()?.json()?; data.lock().unwrap().measurement_rows=rows; Ok("已加载数值明细".into())
+                    }
+                    Command::Delete(id) => { http.delete(format!("{url}/api/v1/sessions/{id}")).send()?.error_for_status()?; data.lock().unwrap().sessions.retain(|s|s.id!=id); Ok("会话已删除".into()) }
                     Command::History(id, query) => {
                         let response: crate::archive::Response = http.get(format!("{url}/api/v1/sessions/{id}/history")).query(&query).send()?.error_for_status()?.json()?;
                         ensure!(response.points.len() <= 2000,"oversized history response");
@@ -352,6 +360,11 @@ pub fn run(args: &Args) -> Result<()> {
                     );
                 }
                 if history { if let Some(response) = &data.history_data {crate::archive::render(f,response,settings.metric);} }
+                if history && !data.measurement_rows.is_empty() {
+                    let mut text=String::from("数值明细（最新 100 条）\n时间 | 电压(V) | 电流(A) | 功率(W) | 能量(Wh) | 样本\n");
+                    for row in &data.measurement_rows { text.push_str(&format!("{} | {:.4} | {:.4} | {:.4} | {:.4} | {}\n",row["ts"].as_str().unwrap_or(""),row["voltage_v"].as_f64().unwrap_or_default(),row["current_a"].as_f64().unwrap_or_default(),row["power_w"].as_f64().unwrap_or_default(),row["energy_wh"].as_f64().unwrap_or_default(),row["samples"].as_u64().unwrap_or(1))); }
+                    f.render_widget(Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("历史数值")),f.area());
+                }
                 if let Some((_, prompt)) = &session_prompt { prompt.render(f); }
                 if let Some(edit) = &editor {
                     edit.render(f);
@@ -408,6 +421,13 @@ pub fn run(args: &Args) -> Result<()> {
             }
         }
         let action = settings.key(key);
+        if history && key.code == KeyCode::Char('d') {
+            let mut d=shared.lock().unwrap(); d.delete_confirm=d.sessions.get(selection).map(|s|s.id); d.message="再次按 d 确认删除，Esc 取消".into(); continue;
+        }
+        if history && key.code == KeyCode::Enter && shared.lock().unwrap().delete_confirm.is_some() {
+            let mut d=shared.lock().unwrap(); let id=d.delete_confirm.take().unwrap(); d.config_busy=true; drop(d); let _=tx.try_send(Command::Delete(id)); continue;
+        }
+        if key.code == KeyCode::Esc { shared.lock().unwrap().delete_confirm=None; }
         if action == ui::Action::RequestExit {
             break;
         }
@@ -477,8 +497,9 @@ pub fn run(args: &Args) -> Result<()> {
                 } else {
                     data.live.as_ref().and_then(|l| l.session_id)
                 };
-                id.map(Command::Download)
+                if history { id.map(Command::Delete) } else { id.map(Command::Download) }
             }
+            KeyCode::Char('v') if history => shared.lock().unwrap().sessions.get(selection).map(|s| Command::Measurements(s.id,None)),
             _ => None,
         };
         if let Some(command) = command {

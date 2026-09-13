@@ -263,7 +263,7 @@ python3 tests/service_config.py  # 设置、排空失败重试、配置冲突与
 - 新版 TUI 在 Linux 上完成约 66 秒 CC 实机采集：660,800 个样本，零丢包，暂存与最终入库计数一致，采集进程内存约 11.7–11.8 MB。
 - Service/client 在双 TUI 客户端下完成约 66 秒 CC 实机观察：680,000 个样本、850 帧，零丢包/无效/丢样；活动会话下载与 SQLite 完整性校验通过，服务端 RSS 约 16–31 MiB。
 - 上述实机测试为近零输入条件，不能替代真实负载下各量程的精度校验。
-- 当前不提供输出电压/开关控制、固件刷写、历史波形查看、CSV 导出或完整示波器功能。
+- 当前不提供输出电压/开关控制、固件刷写、CSV 导出或完整示波器功能。
 
 本项目只发送已验证的校准/状态查询，不修改 DUT 输出。
 
@@ -283,3 +283,4 @@ Service 提供 `POST /api/v1/sessions/{id}/rotate`，请求体为 `{"action":"sa
 - `--history --db path` 以只读方式浏览已有数据库，不连接设备。
 - 实时界面中的“记录时长”是当前会话采集经过时间；“累计写入”是成功提交到 SQLite 的数据字节数，缓存占用另行显示。
 - Service 历史接口：`GET /api/v1/sessions/{id}/history?points=600`，`points` 范围为 1–2000，可附带 `from`、`to` RFC3339 时间。
+- Service 数值明细：`GET /api/v1/sessions/{id}/measurements?before=<id>`，每页最多 100 行；删除会话使用 `DELETE /api/v1/sessions/{id}`，活动会话会返回 `409`。
