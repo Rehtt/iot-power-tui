@@ -103,12 +103,13 @@ impl Drop for TerminalGuard {
         let _ = execute!(stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum OperationKind {
     Stop,
     Reconfigure(recording::Config),
     CheckEmpty,
     Finish(ui::Finish),
+    Rotate { save: bool, name: String },
 }
 struct Completion {
     exit: bool,
@@ -133,6 +134,7 @@ fn begin_operation(
     kind: OperationKind,
     progress: std::sync::Arc<std::sync::Mutex<ui::Progress>>,
 ) -> Operation {
+    let thread_kind = kind.clone();
     let handle = std::thread::spawn(move || {
         *progress.lock().unwrap() = ui::Progress {
             message: "停止采集并暂存剩余数据".into(),
@@ -140,7 +142,21 @@ fn begin_operation(
         };
         runtime.stop();
         let result = (|| -> Result<Completion> {
-            match kind {
+            match thread_kind {
+                OperationKind::Rotate { save, name } => {
+                    if save {
+                        runtime.ensure_saved()?;
+                        let conn = rusqlite::Connection::open(&workspace.database)?;
+                        let id: i64 = conn.query_row("SELECT id FROM sessions ORDER BY id DESC LIMIT 1", [], |r| r.get(0))?;
+                        crate::storage::update_session_name(&workspace.database, id, &name)?;
+                        progress.lock().unwrap().message = "保存旧会话到目标数据库".into();
+                        workspace.save(|done,total| { let mut p=progress.lock().unwrap(); p.done=done; p.total=total; })?;
+                    } else {
+                        progress.lock().unwrap().message = "丢弃旧会话数据".into();
+                        workspace.discard()?;
+                    }
+                    Ok(Completion { exit: false, saved: save, warning: None })
+                }
                 OperationKind::Reconfigure(_) => {
                     runtime.ensure_saved()?;
                     Ok(Completion {
@@ -227,7 +243,7 @@ fn main() -> Result<()> {
 }
 fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
     let target_label = workspace.target.display().to_string();
-    let cache_label = workspace.database.display().to_string();
+    let mut cache_label = workspace.database.display().to_string();
     let guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut config = args.config();
@@ -244,6 +260,7 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
     let progress = std::sync::Arc::new(std::sync::Mutex::new(ui::Progress::default()));
     let mut operation: Option<Operation> = None;
     let mut notice: Option<String> = None;
+    let mut session_prompt: Option<ui::SessionPrompt> = None;
     let mut rate_at = Instant::now();
     let mut rate_count = 0;
     let mut rate = 0.0;
@@ -253,7 +270,7 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
             .is_some_and(|job| job.handle.as_ref().unwrap().is_finished())
         {
             let mut job = operation.take().unwrap();
-            let kind = job.kind;
+            let kind = job.kind.clone();
             let (returned_runtime, returned_workspace, result) = job
                 .handle
                 .take()
@@ -279,6 +296,19 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
                         rate = 0.0;
                         notice = None;
                     }
+                    if matches!(&kind, OperationKind::Stop) {
+                        session_prompt = Some(ui::SessionPrompt::new(workspace.as_ref().unwrap().suggested_name()?));
+                    }
+                    if matches!(kind, OperationKind::Rotate { .. }) {
+                        let next_workspace = workspace::CaptureWorkspace::new(&target_label)?;
+                        cache_label = next_workspace.database.display().to_string();
+                        workspace = Some(next_workspace);
+                        rate_at = Instant::now();
+                        rate_count = 0;
+                        rate = 0.0;
+                        runtime = Some(Runtime::start_config(args.source(), workspace.as_ref().unwrap().database.display().to_string(), config));
+                        shared = runtime.as_ref().unwrap().shared.clone();
+                    }
                     if matches!(kind, OperationKind::CheckEmpty) {
                         settings.dialog = Some(0);
                     }
@@ -288,6 +318,8 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
                     if let OperationKind::Reconfigure(next) = kind {
                         editor = Some(ui::ConfigEditor::new(next));
                         editor.as_mut().unwrap().error = notice.clone();
+                    } else if let OperationKind::Rotate { name, .. } = kind {
+                        session_prompt = Some(ui::SessionPrompt::new(name));
                     } else {
                         settings.dialog = Some(0);
                     }
@@ -322,6 +354,7 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
             if let Some(edit) = &editor {
                 edit.render(f);
             }
+            if let Some(prompt) = &session_prompt { prompt.render(f); }
         })?;
         if !event::poll(frame_deadline.saturating_duration_since(Instant::now()))? {
             continue;
@@ -330,6 +363,14 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
             continue;
         };
         if key.kind != KeyEventKind::Press || operation.is_some() {
+            continue;
+        }
+        if let Some(prompt) = &mut session_prompt {
+            if let Some(choice) = prompt.key(key) {
+                let name = prompt.name.clone();
+                session_prompt = None;
+                operation = Some(begin_operation(runtime.take().unwrap(), workspace.take().unwrap(), OperationKind::Rotate { save: choice == ui::SessionChoice::Save, name }, progress.clone()));
+            }
             continue;
         }
         let edit_result = editor.as_mut().and_then(|edit| edit.key(key));
@@ -368,11 +409,7 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
                 }
                 ui::Action::Finish(action) => Some(OperationKind::Finish(action)),
                 ui::Action::StopRestart => {
-                    if matches!(s.state, State::Stopped | State::Fault) {
-                        Some(OperationKind::Reconfigure(config))
-                    } else {
-                        Some(OperationKind::Stop)
-                    }
+                    Some(OperationKind::Stop)
                 }
             }
         };

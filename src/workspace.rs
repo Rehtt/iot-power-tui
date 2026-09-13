@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use rusqlite::OptionalExtension;
 use std::path::{Path, PathBuf};
 
 /// Deliberately has no automatic deletion: crashes/errors preserve staged data.
@@ -9,6 +10,13 @@ pub struct CaptureWorkspace {
     committed: bool,
 }
 impl CaptureWorkspace {
+    pub fn suggested_name(&self) -> Result<String> {
+        let conn = rusqlite::Connection::open(&self.database)?;
+        let row: Option<(String, String)> = conn.query_row(
+            "SELECT started_at,coalesce(ended_at,started_at) FROM sessions ORDER BY id DESC LIMIT 1",
+            [], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        Ok(row.map(|(a,b)| format!("{a} - {b}")).unwrap_or_else(|| "未命名会话".into()))
+    }
     pub fn new(target: &str) -> Result<Self> {
         let target = std::path::absolute(target).context("resolve save destination")?;
         let parent = target.parent().unwrap_or(Path::new("."));
@@ -69,6 +77,7 @@ mod tests {
             transport: "usb-cc",
             calibration: status(),
             received: chrono::Utc::now(),
+            name: None,
         };
         let mut store = Store::open(path.to_str().unwrap(), &info).unwrap();
         let mut decoder = Decoder::new(Calibration::parse(&status()).unwrap(), info.device.clone());

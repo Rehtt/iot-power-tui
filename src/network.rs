@@ -149,6 +149,8 @@ pub struct Session {
     pub ended_at: Option<String>,
     pub saved: u64,
     pub outcome: Option<String>,
+    #[serde(default)]
+    pub name: String,
 }
 #[derive(Default, Deserialize)]
 struct Page {
@@ -161,6 +163,7 @@ struct Api {
     export: Arc<tokio::sync::Semaphore>,
     config: Arc<Mutex<ConfigState>>,
     barrier: ActiveBarrier,
+    rotations: Rotations,
 }
 type ApiError = (StatusCode, String);
 fn internal(e: impl std::fmt::Display) -> ApiError {
@@ -263,10 +266,39 @@ async fn sessions(
     tokio::task::spawn_blocking(move || -> Result<_,anyhow::Error> {
         if !api.db.exists() { return Ok(Json(Vec::new())); }
         let conn = read_database(&api.db)?;
-        let mut stmt=conn.prepare("SELECT id,device_id,started_at,ended_at,saved_count,outcome FROM sessions WHERE id<?1 ORDER BY id DESC LIMIT 50")?;
-        let rows=stmt.query_map([page.before.unwrap_or(i64::MAX)],|r|Ok(Session{id:r.get(0)?,device:r.get(1)?,started_at:r.get(2)?,ended_at:r.get(3)?,saved:r.get(4)?,outcome:r.get(5)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stmt=conn.prepare("SELECT id,device_id,started_at,ended_at,saved_count,outcome,name FROM sessions WHERE id<?1 ORDER BY id DESC LIMIT 50")?;
+        let rows=stmt.query_map([page.before.unwrap_or(i64::MAX)],|r|Ok(Session{id:r.get(0)?,device:r.get(1)?,started_at:r.get(2)?,ended_at:r.get(3)?,saved:r.get(4)?,outcome:r.get(5)?,name:r.get::<_,Option<String>>(6)?.unwrap_or_default()}))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Json(rows))
     }).await.map_err(internal)?.map_err(internal)
+}
+#[derive(Deserialize)]
+struct RotateRequest { action: String, name: Option<String> }
+#[derive(Serialize)]
+struct RotateResponse { old_session_id: i64, new_session_id: Option<i64>, name: String, state: String }
+struct RotateJob {
+    id: i64,
+    save: bool,
+    name: String,
+    reply: tokio::sync::oneshot::Sender<Result<Json<RotateResponse>, ApiError>>,
+}
+type Rotations = Arc<Mutex<Option<RotateJob>>>;
+async fn rotate(WebState(api): WebState<Api>, Path(id): Path<i64>, Json(req): Json<RotateRequest>) -> Result<Json<RotateResponse>, ApiError> {
+    let save = match req.action.as_str() {
+        "save" => true, "discard" => false,
+        _ => return Err((StatusCode::BAD_REQUEST, "invalid action".into())),
+    };
+    let name = crate::storage::validate_session_name(&req.name.unwrap_or_default())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let (reply, received) = tokio::sync::oneshot::channel();
+    {
+        let mut config = api.config.lock().unwrap();
+        if config.state == "applying" || config.state == "rotating" || api.live.lock().unwrap().session_id != Some(id) {
+            return Err((StatusCode::CONFLICT, "session changed or operation in progress".into()));
+        }
+        config.state = "rotating".into();
+        *api.rotations.lock().unwrap() = Some(RotateJob { id, save, name, reply });
+    }
+    received.await.map_err(internal)?
 }
 pub fn read_database(path: &std::path::Path) -> Result<rusqlite::Connection> {
     // URI mode applies read-only to the source alone; attached export databases
@@ -505,7 +537,7 @@ fn update_config(state: &mut ConfigState, request: ConfigRequest) -> Result<bool
     }
     .validate()
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    if request.revision != state.revision || state.state == "applying" {
+    if request.revision != state.revision || matches!(state.state.as_str(), "applying" | "rotating") {
         return Err((
             StatusCode::CONFLICT,
             "configuration changed or an operation is already running".into(),
@@ -556,6 +588,7 @@ async fn supervise(
             crate::recording::Config::default(),
         ))),
         Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(None)),
     )
     .await;
 }
@@ -569,11 +602,14 @@ async fn supervise_control(
     should_stop: impl Fn() -> bool,
     control: Arc<Mutex<ConfigState>>,
     barrier: ActiveBarrier,
+    rotations: Rotations,
 ) {
     let mut config = control.lock().unwrap().config;
     let mut capture = Some(Runtime::start_config(source(), db.into(), config));
     let mut shared = capture.as_ref().unwrap().shared.clone();
     let mut operation: Option<CaptureOperation> = None;
+    let mut rotation: Option<RotateJob> = None;
+    let mut rotation_waiting = false;
     let mut finalized = false;
     let mut retry = 2u64;
     let mut retry_at = None;
@@ -590,7 +626,27 @@ async fn supervise_control(
             let summary = old.shared.lock().unwrap().clone();
             capture = Some(old);
             finalized = true;
-            if applying {
+            if rotation.is_some() {
+                match result {
+                    Ok(()) => {
+                        if let Some(job) = rotation.as_mut() {
+                            if job.save {
+                                if let Ok(conn) = read_database(std::path::Path::new(db)) {
+                                    if let Ok(name) = conn.query_row("SELECT name FROM sessions WHERE id=?1", [job.id], |r| r.get::<_,String>(0)) { job.name = name; }
+                                }
+                            }
+                        }
+                        retry_at = Some(Instant::now()); rotation_waiting = true;
+                    }
+                    Err(e) => {
+                        let mut c = control.lock().unwrap();
+                        c.state = "failed".into();
+                        c.error = Some(format!("{e:#}"));
+                        let job = rotation.take().unwrap();
+                        let _ = job.reply.send(Err(internal(e)));
+                    }
+                }
+            } else if applying {
                 let mut c = control.lock().unwrap();
                 match result {
                     Ok(()) => {
@@ -636,6 +692,12 @@ async fn supervise_control(
             rate_at = Instant::now();
         }
         let s = shared.lock().unwrap().clone();
+        if rotation_waiting && rotation.as_ref().is_some_and(|job| s.session_id != Some(job.id) || s.state == State::Fault) {
+            let job = rotation.take().unwrap();
+            rotation_waiting = false;
+            control.lock().unwrap().state = "idle".into();
+            let _ = job.reply.send(Ok(Json(RotateResponse { old_session_id: job.id, new_session_id: s.session_id, name: job.name, state: format!("{:?}", s.state) })));
+        }
         if rate_at.elapsed() >= Duration::from_secs(1) {
             rate = s.received.saturating_sub(rate_count) as f64 / rate_at.elapsed().as_secs_f64();
             rate_count = s.received;
@@ -652,17 +714,30 @@ async fn supervise_control(
         if s.state == State::Capturing && s.saved > 0 {
             retry = 2;
         }
+        if operation.is_none() && rotation.is_none() {
+            rotation = rotations.lock().unwrap().take();
+        }
+        let rotating = rotation.is_some() && !rotation_waiting;
         let applying = control.lock().unwrap().state == "applying";
         if operation.is_none()
-            && (applying || (!finalized && matches!(s.state, State::Fault | State::Stopped)))
+            && (rotating || applying || (!finalized && matches!(s.state, State::Fault | State::Stopped)))
         {
             retry_at = None;
             *barrier.lock().unwrap() = None;
             let mut old = capture.take().unwrap();
+            let rotate_data = rotation.as_ref().map(|job| (job.id, job.save, job.name.clone()));
+            let database = db.to_string();
             operation = Some((
                 std::thread::spawn(move || {
                     old.stop();
-                    let result = if applying { old.ensure_saved() } else { Ok(()) };
+                    let result = (|| -> Result<()> {
+                        if applying || rotating { old.ensure_saved()?; }
+                        if let Some((id, save, name)) = rotate_data {
+                            if save { crate::storage::update_session_name(std::path::Path::new(&database), id, &name)?; }
+                            else { crate::storage::delete_session(std::path::Path::new(&database), id)?; }
+                        }
+                        Ok(())
+                    })();
                     (old, result)
                 }),
                 applying,
@@ -715,7 +790,9 @@ pub fn run(args: &Args) -> Result<()> {
         ))));
         let control = Arc::new(Mutex::new(ConfigState::new(args.config())));
         let barrier = Arc::new(Mutex::new(None));
+        let rotations = Arc::new(Mutex::new(None));
         let api = Api {
+            rotations: rotations.clone(),
             config: control.clone(),
             barrier: barrier.clone(),
             live: live.clone(),
@@ -726,6 +803,7 @@ pub fn run(args: &Args) -> Result<()> {
             .route("/api/v1/config", get(get_config).put(put_config))
             .route("/api/v1/status", get(status))
             .route("/api/v1/sessions", get(sessions))
+            .route("/api/v1/sessions/{id}/rotate", axum::routing::post(rotate))
             .route("/api/v1/sessions/{id}/download", get(download))
             .with_state(api);
         let stopping = Arc::new(AtomicBool::new(false));
@@ -752,6 +830,7 @@ pub fn run(args: &Args) -> Result<()> {
             || stopping.load(Ordering::Relaxed) || server.is_finished(),
             control,
             barrier,
+            rotations,
         )
         .await;
         // Bound shutdown even when a remote peer stops reading a download.
@@ -889,6 +968,7 @@ mod tests {
                 },
                 config.clone(),
                 Arc::new(Mutex::new(None)),
+                Arc::new(Mutex::new(None)),
             ));
         assert!(requested.load(Ordering::Relaxed));
         let state = config.lock().unwrap();
@@ -985,6 +1065,7 @@ mod tests {
             transport: "usb-cc",
             calibration: status(),
             received: chrono::Utc::now(),
+            name: None,
         };
         let mut first = Store::open(db.to_str().unwrap(), &info).unwrap();
         let mut decoder = Decoder::new(Calibration::parse(&status()).unwrap(), info.device.clone());

@@ -662,6 +662,7 @@ mod tests {
                 transport: "mock",
                 calibration: vec![],
                 received: chrono::Utc::now(),
+            name: None,
             }))
             .unwrap();
         assert!(sink
@@ -721,6 +722,7 @@ mod tests {
             transport: "mock",
             calibration: vec![],
             received: chrono::Utc::now(),
+            name: None,
         };
         drop(Store::open(path.to_str().unwrap(), &info).unwrap());
         let conn = rusqlite::Connection::open(&path).unwrap();

@@ -30,6 +30,7 @@ pub struct SessionInfo {
     pub transport: &'static str,
     pub calibration: Vec<u8>,
     pub received: DateTime<Utc>,
+    pub name: Option<String>,
 }
 pub enum Message {
     Ready(SessionInfo),
@@ -64,6 +65,7 @@ impl Sink {
             transport,
             calibration,
             received: Utc::now(),
+            name: None,
         }))?;
         self.state(State::Capturing);
         Ok(())

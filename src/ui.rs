@@ -22,6 +22,27 @@ pub enum Action {
     Reset,
     Configure,
 }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SessionChoice { Save, Discard }
+pub struct SessionPrompt { pub choice: usize, pub name: String, pub closed: bool, replace: bool }
+impl SessionPrompt {
+    pub fn new(name: String) -> Self { Self { choice: 0, name, closed: false, replace: true } }
+    pub fn key(&mut self, key: KeyEvent) -> Option<SessionChoice> {
+        if key.code == KeyCode::Esc { self.closed = true; return Some(SessionChoice::Discard); }
+        match key.code {
+            KeyCode::Up | KeyCode::Left | KeyCode::BackTab | KeyCode::Down | KeyCode::Right | KeyCode::Tab => self.choice = 1 - self.choice,
+            KeyCode::Char('n') if self.replace => return Some(SessionChoice::Discard),
+            KeyCode::Char('y') if self.replace => self.choice = 0,
+            KeyCode::Enter if self.choice == 1 => return Some(SessionChoice::Discard),
+            KeyCode::Enter => { let n=self.name.trim().to_string(); if !n.is_empty() && n.len()<=128 && !n.chars().any(char::is_control) { return Some(SessionChoice::Save); } }
+            KeyCode::Backspace => { if self.replace { self.name.clear(); self.replace=false; } else { self.name.pop(); } }
+            KeyCode::Char(c) if !c.is_control() => { if self.replace { self.name.clear(); self.replace=false; } if self.name.len()+c.len_utf8()<=128 { self.name.push(c); } }
+            _ => {}
+        }
+        None
+    }
+    pub fn render(&self, f: &mut Frame<'_>) { modal(f, " 会话切换 ", &format!("保存旧会话并创建新会话？\n名称：{}\n输入名称后按 Enter 保存；n 直接丢弃。\n名称长度 1–128 字节。", self.name), Some(self.choice)); }
+}
 pub struct UiState {
     pub metric: usize,
     pub window: usize,

@@ -52,7 +52,7 @@ impl Store {
     pub fn open_config(path: &str, info: &SessionInfo, config: Config) -> Result<Self> {
         let mut conn = open_database(path)?;
         let tx = conn.transaction()?;
-        tx.execute("INSERT INTO sessions(device_id,started_at,transport,calibration,calibration_received_at,timestamp_basis,outcome) VALUES (?1,?2,?3,?4,?2,?5,'incomplete')",params![info.device,info.received.to_rfc3339(),info.transport,info.calibration,if info.transport=="usb-cc" {"estimated: first packet reception, 100 us/sample, packet counter"} else {"source timestamp"}])?;
+        tx.execute("INSERT INTO sessions(device_id,started_at,transport,calibration,calibration_received_at,timestamp_basis,outcome,name) VALUES (?1,?2,?3,?4,?2,?5,'incomplete',?6)",params![info.device,info.received.to_rfc3339(),info.transport,info.calibration,if info.transport=="usb-cc" {"estimated: first packet reception, 100 us/sample, packet counter"} else {"source timestamp"},info.name.clone().unwrap_or_default()])?;
         let session_id = tx.last_insert_rowid();
         tx.execute(
             "UPDATE sessions SET sample_rate_hz=?2,buffer_size_bytes=?3 WHERE id=?1",
@@ -316,6 +316,7 @@ pub(crate) fn initialize_schema(tx: &rusqlite::Transaction<'_>) -> Result<()> {
             "saved_source_count",
             "INTEGER NOT NULL DEFAULT 0",
         ),
+        ("sessions", "name", "TEXT NOT NULL DEFAULT ''"),
         ("frames", "capture_sequence", "INTEGER"),
         ("measurements", "source_count", "INTEGER NOT NULL DEFAULT 1"),
         ("measurements", "end_ts", "TEXT"),
@@ -461,8 +462,55 @@ pub fn import_capture(
     Ok(copied)
 }
 
+pub fn time_range_name(start: &str, end: &str) -> String {
+    fn display(value: &str) -> String {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map(|t| t.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M:%SZ").to_string())
+            .unwrap_or_else(|_| value.into())
+    }
+    format!("{} - {}", display(start), display(end))
+}
+pub fn validate_session_name(name: &str) -> Result<String> {
+    ensure!(!name.chars().any(char::is_control), "name contains control characters");
+    let name = name.trim();
+    ensure!(name.len() <= 128, "name exceeds 128 UTF-8 bytes");
+    Ok(name.into())
+}
+
+pub fn update_session_name(path: &std::path::Path, id: i64, name: &str) -> Result<()> {
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    let mut name = validate_session_name(name)?;
+    if name.is_empty() {
+        let (start, end): (String, Option<String>) = tx.query_row("SELECT started_at,ended_at FROM sessions WHERE id=?1", [id], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        name = time_range_name(&start, &end.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()));
+    }
+    let changed = tx.execute("UPDATE sessions SET name=?1 WHERE id=?2", params![name, id])?;
+    ensure!(changed == 1, "session not found");
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn delete_session(path: &std::path::Path, id: i64) -> Result<()> {
+    let mut conn = Connection::open(path)?;
+    conn.execute_batch("PRAGMA foreign_keys=ON")?;
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM measurements WHERE session_id=?1", [id])?;
+    tx.execute("DELETE FROM frames WHERE session_id=?1", [id])?;
+    ensure!(tx.execute("DELETE FROM sessions WHERE id=?1", [id])? == 1, "session not found");
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_name_validation_trims_and_rejects_invalid_values() {
+        assert_eq!(super::validate_session_name("  测试  ").unwrap(), "测试");
+        assert!(super::validate_session_name("").unwrap().is_empty());
+        assert!(super::validate_session_name("a\n").is_err());
+        assert!(super::validate_session_name(&"x".repeat(129)).is_err());
+    }
     #[test]
     #[ignore = "manual hardware throughput benchmark; synthetic data only"]
     fn profile_recording_stages() {
@@ -474,6 +522,7 @@ mod tests {
             transport: "usb-cc",
             calibration: vec![],
             received: chrono::Utc::now(),
+            name: None,
         };
         for cache_kib in [8192, 8194] {
             let path = dir.path().join(format!("profile-{cache_kib}.db"));
@@ -561,6 +610,7 @@ mod tests {
             transport: "usb-cc",
             calibration: vec![1, 2],
             received: chrono::Utc::now(),
+            name: None,
         };
         let config = Config {
             sample_rate_hz: 1,
@@ -679,6 +729,7 @@ mod tests {
             transport: "usb-cc",
             calibration: status(),
             received: now,
+            name: None,
         };
         let mut store = Store::open(path.to_str().unwrap(), &info).unwrap();
         let mut decoder = Decoder::new(Calibration::parse(&status()).unwrap(), info.device.clone());
@@ -736,6 +787,7 @@ mod tests {
             transport: "usb-cc",
             calibration: status(),
             received: now,
+            name: None,
         };
         let mut store = Store::open(path.to_str().unwrap(), &info).unwrap();
         let mut decoder = Decoder::new(Calibration::parse(&status()).unwrap(), info.device.clone());

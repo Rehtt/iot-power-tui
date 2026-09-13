@@ -36,6 +36,7 @@ enum Command {
     Sessions(Option<i64>),
     Download(i64),
     Refresh,
+    Rotate(i64, bool, String),
     LoadConfig,
     ApplyConfig(crate::recording::Config, u64),
 }
@@ -178,7 +179,7 @@ pub fn run(args: &Args) -> Result<()> {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            let configuring=matches!(command,Command::ApplyConfig(..));
+            let configuring=matches!(command,Command::ApplyConfig(..) | Command::Rotate(..));
             let downloading = matches!(command,Command::Download(_));
             let result = (|| -> Result<String> {
                 match command {
@@ -230,6 +231,15 @@ pub fn run(args: &Args) -> Result<()> {
                         }
                         Ok("设置已应用，新会话已开始".into())
                     }
+                    Command::Rotate(id, save, name) => {
+                        let response = http.post(format!("{url}/api/v1/sessions/{id}/rotate"))
+                            .timeout(Duration::from_secs(300))
+                            .json(&serde_json::json!({"action": if save {"save"} else {"discard"}, "name": name}))
+                            .send()?;
+                        let status = response.status();
+                        ensure!(status.is_success(), "会话切换失败：{} {}", status, response.text()?);
+                        Ok("旧会话已处理，新会话已开始；h 查看历史".into())
+                    }
                     Command::Refresh => Ok("实时数据每 200 ms 自动刷新".into()),
                 }
             })();
@@ -248,6 +258,7 @@ pub fn run(args: &Args) -> Result<()> {
     let mut history = false;
     let mut selection = 0usize;
     let mut editor: Option<ui::ConfigEditor> = None;
+    let mut session_prompt: Option<(i64, ui::SessionPrompt)> = None;
     let mut editor_revision = 0;
     let mut waiting_config = false;
     loop {
@@ -313,7 +324,7 @@ pub fn run(args: &Args) -> Result<()> {
                             "{} #{} {} {} 条记录 {}",
                             if i == selection { ">" } else { " " },
                             s.id,
-                            s.started_at,
+                            if s.name.is_empty() {format!("{} - {}", s.started_at, s.ended_at.as_deref().unwrap_or("采集中"))} else {s.name.clone()},
                             s.saved,
                             if s.ended_at.is_none() {
                                 "未结束（下载为部分快照）"
@@ -328,6 +339,7 @@ pub fn run(args: &Args) -> Result<()> {
                         area,
                     );
                 }
+                if let Some((_, prompt)) = &session_prompt { prompt.render(f); }
                 if let Some(edit) = &editor {
                     edit.render(f);
                 }
@@ -340,6 +352,17 @@ pub fn run(args: &Args) -> Result<()> {
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        if let Some((id, prompt)) = &mut session_prompt {
+            if let Some(choice) = prompt.key(key) {
+                let mut remote = shared.lock().unwrap();
+                if !remote.config_busy && tx.try_send(Command::Rotate(*id, matches!(choice, ui::SessionChoice::Save), prompt.name.clone())).is_ok() {
+                    remote.config_busy = true;
+                    remote.message = "正在排空缓存并切换会话…".into();
+                    session_prompt = None;
+                }
+            }
             continue;
         }
         if let Some(edit) = &mut editor {
@@ -367,6 +390,16 @@ pub fn run(args: &Args) -> Result<()> {
             break;
         }
         let command = match key.code {
+            KeyCode::Char('s') => {
+                let data = shared.lock().unwrap();
+                if !data.config_busy {
+                    if let Some(id) = data.live.as_ref().and_then(|l| l.session_id) {
+                        let name = data.sessions.iter().find(|s| s.id == id).map(|s| format!("{} - {}", s.started_at, chrono::Utc::now().format("%Y-%m-%d %H:%M:%SZ"))).unwrap_or_default();
+                        session_prompt = Some((id, ui::SessionPrompt::new(name)));
+                    }
+                }
+                None
+            }
             KeyCode::Char('c') => {
                 let mut data = shared.lock().unwrap();
                 if data.config_busy {
