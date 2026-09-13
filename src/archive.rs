@@ -22,8 +22,20 @@ pub struct Point {
     pub ts: String, pub voltage_v: f64, pub current_a: f64, pub power_w: f64,
     pub samples: u64, pub min: [f64;3], pub max: [f64;3], pub break_before: bool,
 }
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Statistics {
+    pub average_voltage_v: f64,
+    pub maximum_voltage_v: f64,
+    pub average_current_a: f64,
+    pub maximum_current_a: f64,
+    pub average_power_w: f64,
+    pub maximum_power_w: f64,
+    pub duration_secs: f64,
+    pub energy_wh: f64,
+    pub samples: u64,
+}
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Response { pub session_id: i64, pub from: Option<String>, pub to: Option<String>, pub points: Vec<Point> }
+pub struct Response { pub session_id: i64, pub from: Option<String>, pub to: Option<String>, pub points: Vec<Point>, #[serde(default)] pub statistics: Statistics }
 fn columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
     Ok(conn.prepare(&format!("PRAGMA table_info({table})"))?.query_map([], |r| r.get(1))?.collect::<rusqlite::Result<_>>()?)
 }
@@ -47,7 +59,7 @@ pub fn read(path: &Path, id: i64, query: &Query, cancel: &AtomicBool) -> Result<
         last = Some(last.map_or(end, |v|v.max(end)));
     }
     drop(rows);
-    let (Some(start),Some(end)) = (first,last) else {return Ok(Response{session_id:id,from:None,to:None,points:vec![]})};
+    let (Some(start),Some(end)) = (first,last) else {return Ok(Response{session_id:id,from:None,to:None,points:vec![],statistics:Statistics::default()})};
     let start = query.from.as_deref().map(time).transpose()?.unwrap_or(start);
     let end = query.to.as_deref().map(time).transpose()?.unwrap_or(end);
     let span = end.saturating_sub(start).max(1);
@@ -78,8 +90,28 @@ pub fn read(path: &Path, id: i64, query: &Query, cancel: &AtomicBool) -> Result<
             p.break_before |= gap;
         } else { buckets.insert(index,Point{ts,voltage_v:values[0],current_a:values[1],power_w:values[2],samples:count,min,max,break_before:gap}); }
     }
+    let points: Vec<Point> = buckets.into_values().collect();
+    let mut stats = Statistics { duration_secs: end.saturating_sub(start) as f64 / 1e6, maximum_voltage_v: f64::NEG_INFINITY, maximum_current_a: f64::NEG_INFINITY, maximum_power_w: f64::NEG_INFINITY, ..Statistics::default() };
+    for p in &points {
+        stats.samples += p.samples;
+        stats.average_voltage_v += p.voltage_v * p.samples as f64;
+        stats.average_current_a += p.current_a * p.samples as f64;
+        stats.average_power_w += p.power_w * p.samples as f64;
+        stats.maximum_voltage_v = stats.maximum_voltage_v.max(p.max[0]);
+        stats.maximum_current_a = stats.maximum_current_a.max(p.max[1]);
+        stats.maximum_power_w = stats.maximum_power_w.max(p.max[2]);
+    }
+    if stats.samples > 0 {
+        let n = stats.samples as f64;
+        stats.average_voltage_v /= n;
+        stats.average_current_a /= n;
+        stats.average_power_w /= n;
+    }
+    if stats.samples == 0 { stats.maximum_voltage_v = 0.0; stats.maximum_current_a = 0.0; stats.maximum_power_w = 0.0; }
+    let energy_field = if names.iter().any(|s| s == "energy_wh") { "energy_wh" } else { "0" };
+    stats.energy_wh = conn.query_row(&format!("SELECT coalesce(({energy_field}) - (SELECT {energy_field} FROM measurements WHERE session_id=?1 ORDER BY id LIMIT 1),0) FROM measurements WHERE session_id=?1 ORDER BY id DESC LIMIT 1"), [id], |r| r.get::<_, f64>(0)).unwrap_or(0.0_f64).max(0.0);
     let stamp = |us| chrono::DateTime::from_timestamp_micros(us).unwrap().to_rfc3339();
-    Ok(Response{session_id:id,from:Some(stamp(start)),to:Some(stamp(end)),points:buckets.into_values().collect()})
+    Ok(Response{session_id:id,from:Some(stamp(start)),to:Some(stamp(end)),points,statistics:stats})
 }
 
 #[cfg(test)]
@@ -98,6 +130,10 @@ mod tests {
         assert_eq!(result.points[0].samples,4);
         assert_eq!(result.points[0].voltage_v,2.5);
         assert_eq!(result.points[0].max[0],9.0);
+        assert_eq!(result.statistics.samples, 4);
+        assert_eq!(result.statistics.average_voltage_v, 2.5);
+        assert_eq!(result.statistics.maximum_voltage_v, 9.0);
+        assert_eq!(result.statistics.duration_secs, 1.0);
         assert!(result.points[0].break_before);
         assert_eq!(before,std::fs::read(&path).unwrap());
         assert!(read(&path,2,&Query::default(),&AtomicBool::new(false)).is_err());
@@ -109,7 +145,7 @@ pub fn render(f: &mut ratatui::Frame<'_>, response: &Response, metric: usize) {
     use ratatui::{prelude::*, widgets::{Axis, Block, Borders, Chart, Clear, Dataset, GraphType, Paragraph}};
     let area = f.area();
     f.render_widget(Clear,area);
-    let rows = Layout::vertical([Constraint::Min(4),Constraint::Length(3)]).split(area);
+    let rows = Layout::vertical([Constraint::Min(4),Constraint::Length(5)]).split(area);
     let mut groups: Vec<Vec<(f64,f64)>> = vec![vec![]];
     let mut low = vec![];
     let mut high = vec![];
@@ -134,7 +170,8 @@ pub fn render(f: &mut ratatui::Frame<'_>, response: &Response, metric: usize) {
     f.render_widget(Chart::new(sets).block(Block::default().borders(Borders::ALL).title(format!("历史会话 #{} · {} · {} 桶",response.session_id,unit,response.points.len())))
         .x_axis(Axis::default().bounds([0.,((end-origin) as f64/1e6).max(1e-6)]).title("相对时间 / s"))
         .y_axis(Axis::default().bounds(bounds).labels([format!("{:.4}",bounds[0]),format!("{:.4}",bounds[1])])),rows[0]);
-    f.render_widget(Paragraph::new(format!("{} — {}\n1/2/3 指标 · [/] 缩放 · ←/→ 移动 · Home 全部 · Esc 返回 · r 刷新",response.from.as_deref().unwrap_or("空会话"),response.to.as_deref().unwrap_or(""))),rows[1]);
+    let s = &response.statistics;
+    f.render_widget(Paragraph::new(format!("{} — {}\n平均电压 {:.4} V · 最高电压 {:.4} V · 平均电流 {:.4} A · 最高电流 {:.4} A\n平均功率 {:.4} W · 最高功率 {:.4} W · 总时长 {:.3} s · 总计电能 {:.6} Wh\n1/2/3 指标 · [/] 缩放 · ←/→ 移动 · Home 全部 · Esc 返回 · r 刷新",response.from.as_deref().unwrap_or("空会话"),response.to.as_deref().unwrap_or(""),s.average_voltage_v,s.maximum_voltage_v,s.average_current_a,s.maximum_current_a,s.average_power_w,s.maximum_power_w,s.duration_secs,s.energy_wh)),rows[1]);
 }
 
 /// A local browser owns only its terminal event loop; capture workers keep running.
