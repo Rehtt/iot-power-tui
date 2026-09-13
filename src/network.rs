@@ -40,8 +40,10 @@ pub struct Live {
     pub buffered_bytes: usize,
     #[serde(default)]
     pub writing_bytes: usize,
-    #[serde(default)] pub committed_bytes: u64,
-    #[serde(default)] pub duration_secs: f64,
+    #[serde(default)]
+    pub committed_bytes: u64,
+    #[serde(default)]
+    pub duration_secs: f64,
     #[serde(default)]
     pub config: crate::recording::Config,
     pub gaps: u64,
@@ -159,9 +161,22 @@ pub struct Session {
     pub name: String,
 }
 #[derive(Serialize)]
-struct DeleteResponse { session_id: i64, measurements: u64, frames: u64 }
+struct DeleteResponse {
+    session_id: i64,
+    measurements: u64,
+    frames: u64,
+}
 #[derive(Serialize)]
-struct MeasurementRow { id:i64, ts:String, voltage_v:Option<f64>, current_a:Option<f64>, power_w:Option<f64>, energy_wh:Option<f64>, samples:u64, partial:bool }
+struct MeasurementRow {
+    id: i64,
+    ts: String,
+    voltage_v: Option<f64>,
+    current_a: Option<f64>,
+    power_w: Option<f64>,
+    energy_wh: Option<f64>,
+    samples: u64,
+    partial: bool,
+}
 #[derive(Default, Deserialize)]
 struct Page {
     before: Option<i64>,
@@ -281,21 +296,57 @@ async fn sessions(
         Ok(Json(rows))
     }).await.map_err(internal)?.map_err(internal)
 }
-async fn delete_session_api(WebState(api): WebState<Api>, Path(id): Path<i64>) -> Result<Json<DeleteResponse>, ApiError> {
-    if api.live.lock().unwrap().session_id == Some(id) { return Err((StatusCode::CONFLICT, "active session cannot be deleted".into())); }
+async fn delete_session_api(
+    WebState(api): WebState<Api>,
+    Path(id): Path<i64>,
+) -> Result<Json<DeleteResponse>, ApiError> {
+    if api.live.lock().unwrap().session_id == Some(id) {
+        return Err((
+            StatusCode::CONFLICT,
+            "active session cannot be deleted".into(),
+        ));
+    }
     tokio::task::spawn_blocking(move || -> Result<Json<DeleteResponse>> {
         let conn = crate::network::read_database(&api.db)?;
-        let measurements: u64 = conn.query_row("SELECT count(*) FROM measurements WHERE session_id=?1", [id], |r|r.get(0))?;
-        let frames: u64 = conn.query_row("SELECT count(*) FROM frames WHERE session_id=?1", [id], |r|r.get(0))?;
-        let exists: u64 = conn.query_row("SELECT count(*) FROM sessions WHERE id=?1", [id], |r|r.get(0))?;
+        let measurements: u64 = conn.query_row(
+            "SELECT count(*) FROM measurements WHERE session_id=?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        let frames: u64 = conn.query_row(
+            "SELECT count(*) FROM frames WHERE session_id=?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        let exists: u64 =
+            conn.query_row("SELECT count(*) FROM sessions WHERE id=?1", [id], |r| {
+                r.get(0)
+            })?;
         anyhow::ensure!(exists == 1, "session not found");
         drop(conn);
-        crate::storage::delete_session(&api.db,id)?;
-        Ok(Json(DeleteResponse{session_id:id,measurements,frames}))
-    }).await.map_err(internal)?.map_err(|e| if e.to_string()=="session not found" {(StatusCode::NOT_FOUND,e.to_string())} else {internal(e)})
+        crate::storage::delete_session(&api.db, id)?;
+        Ok(Json(DeleteResponse {
+            session_id: id,
+            measurements,
+            frames,
+        }))
+    })
+    .await
+    .map_err(internal)?
+    .map_err(|e| {
+        if e.to_string() == "session not found" {
+            (StatusCode::NOT_FOUND, e.to_string())
+        } else {
+            internal(e)
+        }
+    })
 }
-async fn measurements_api(WebState(api): WebState<Api>, Path(id): Path<i64>, Query(page): Query<Page>) -> Result<Json<Vec<MeasurementRow>>, ApiError> {
-    let before=page.before.unwrap_or(i64::MAX);
+async fn measurements_api(
+    WebState(api): WebState<Api>,
+    Path(id): Path<i64>,
+    Query(page): Query<Page>,
+) -> Result<Json<Vec<MeasurementRow>>, ApiError> {
+    let before = page.before.unwrap_or(i64::MAX);
     tokio::task::spawn_blocking(move || -> Result<Json<Vec<MeasurementRow>>> {
         let conn=read_database(&api.db)?;
         let mut stmt=conn.prepare("SELECT id,ts,voltage_v,current_a,power_w,energy_wh,coalesce(source_count,1),coalesce(partial,0) FROM measurements WHERE session_id=?1 AND id<?2 ORDER BY id DESC LIMIT 100")?;
@@ -303,18 +354,40 @@ async fn measurements_api(WebState(api): WebState<Api>, Path(id): Path<i64>, Que
         Ok(Json(rows))
     }).await.map_err(internal)?.map_err(internal)
 }
-async fn session_history(WebState(api): WebState<Api>, Path(id): Path<i64>, Query(query): Query<crate::archive::Query>) -> Result<Json<crate::archive::Response>, ApiError> {
-    query.validate().map_err(|e| (StatusCode::BAD_REQUEST,e.to_string()))?;
+async fn session_history(
+    WebState(api): WebState<Api>,
+    Path(id): Path<i64>,
+    Query(query): Query<crate::archive::Query>,
+) -> Result<Json<crate::archive::Response>, ApiError> {
+    query
+        .validate()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let cancel = Arc::new(AtomicBool::new(false));
     let _guard = CancelExport(cancel.clone());
-    tokio::task::spawn_blocking(move || crate::archive::read(&api.db,id,&query,&cancel)).await.map_err(internal)?.map(Json).map_err(|e| {
-        if e.to_string() == "session not found" {(StatusCode::NOT_FOUND,e.to_string())} else {internal(e)}
-    })
+    tokio::task::spawn_blocking(move || crate::archive::read(&api.db, id, &query, &cancel))
+        .await
+        .map_err(internal)?
+        .map(Json)
+        .map_err(|e| {
+            if e.to_string() == "session not found" {
+                (StatusCode::NOT_FOUND, e.to_string())
+            } else {
+                internal(e)
+            }
+        })
 }
 #[derive(Deserialize)]
-struct RotateRequest { action: String, name: Option<String> }
+struct RotateRequest {
+    action: String,
+    name: Option<String>,
+}
 #[derive(Serialize)]
-struct RotateResponse { old_session_id: i64, new_session_id: Option<i64>, name: String, state: String }
+struct RotateResponse {
+    old_session_id: i64,
+    new_session_id: Option<i64>,
+    name: String,
+    state: String,
+}
 struct RotateJob {
     id: i64,
     save: bool,
@@ -322,9 +395,14 @@ struct RotateJob {
     reply: tokio::sync::oneshot::Sender<Result<Json<RotateResponse>, ApiError>>,
 }
 type Rotations = Arc<Mutex<Option<RotateJob>>>;
-async fn rotate(WebState(api): WebState<Api>, Path(id): Path<i64>, Json(req): Json<RotateRequest>) -> Result<Json<RotateResponse>, ApiError> {
+async fn rotate(
+    WebState(api): WebState<Api>,
+    Path(id): Path<i64>,
+    Json(req): Json<RotateRequest>,
+) -> Result<Json<RotateResponse>, ApiError> {
     let save = match req.action.as_str() {
-        "save" => true, "discard" => false,
+        "save" => true,
+        "discard" => false,
         _ => return Err((StatusCode::BAD_REQUEST, "invalid action".into())),
     };
     let name = crate::storage::validate_session_name(&req.name.unwrap_or_default())
@@ -332,11 +410,22 @@ async fn rotate(WebState(api): WebState<Api>, Path(id): Path<i64>, Json(req): Js
     let (reply, received) = tokio::sync::oneshot::channel();
     {
         let mut config = api.config.lock().unwrap();
-        if config.state == "applying" || config.state == "rotating" || api.live.lock().unwrap().session_id != Some(id) {
-            return Err((StatusCode::CONFLICT, "session changed or operation in progress".into()));
+        if config.state == "applying"
+            || config.state == "rotating"
+            || api.live.lock().unwrap().session_id != Some(id)
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                "session changed or operation in progress".into(),
+            ));
         }
         config.state = "rotating".into();
-        *api.rotations.lock().unwrap() = Some(RotateJob { id, save, name, reply });
+        *api.rotations.lock().unwrap() = Some(RotateJob {
+            id,
+            save,
+            name,
+            reply,
+        });
     }
     received.await.map_err(internal)?
 }
@@ -577,7 +666,8 @@ fn update_config(state: &mut ConfigState, request: ConfigRequest) -> Result<bool
     }
     .validate()
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    if request.revision != state.revision || matches!(state.state.as_str(), "applying" | "rotating") {
+    if request.revision != state.revision || matches!(state.state.as_str(), "applying" | "rotating")
+    {
         return Err((
             StatusCode::CONFLICT,
             "configuration changed or an operation is already running".into(),
@@ -672,11 +762,18 @@ async fn supervise_control(
                         if let Some(job) = rotation.as_mut() {
                             if job.save {
                                 if let Ok(conn) = read_database(std::path::Path::new(db)) {
-                                    if let Ok(name) = conn.query_row("SELECT name FROM sessions WHERE id=?1", [job.id], |r| r.get::<_,String>(0)) { job.name = name; }
+                                    if let Ok(name) = conn.query_row(
+                                        "SELECT name FROM sessions WHERE id=?1",
+                                        [job.id],
+                                        |r| r.get::<_, String>(0),
+                                    ) {
+                                        job.name = name;
+                                    }
                                 }
                             }
                         }
-                        retry_at = Some(Instant::now()); rotation_waiting = true;
+                        retry_at = Some(Instant::now());
+                        rotation_waiting = true;
                     }
                     Err(e) => {
                         let mut c = control.lock().unwrap();
@@ -732,11 +829,20 @@ async fn supervise_control(
             rate_at = Instant::now();
         }
         let s = shared.lock().unwrap().clone();
-        if rotation_waiting && rotation.as_ref().is_some_and(|job| s.session_id != Some(job.id) || s.state == State::Fault) {
+        if rotation_waiting
+            && rotation
+                .as_ref()
+                .is_some_and(|job| s.session_id != Some(job.id) || s.state == State::Fault)
+        {
             let job = rotation.take().unwrap();
             rotation_waiting = false;
             control.lock().unwrap().state = "idle".into();
-            let _ = job.reply.send(Ok(Json(RotateResponse { old_session_id: job.id, new_session_id: s.session_id, name: job.name, state: format!("{:?}", s.state) })));
+            let _ = job.reply.send(Ok(Json(RotateResponse {
+                old_session_id: job.id,
+                new_session_id: s.session_id,
+                name: job.name,
+                state: format!("{:?}", s.state),
+            })));
         }
         if rate_at.elapsed() >= Duration::from_secs(1) {
             rate = s.received.saturating_sub(rate_count) as f64 / rate_at.elapsed().as_secs_f64();
@@ -760,21 +866,37 @@ async fn supervise_control(
         let rotating = rotation.is_some() && !rotation_waiting;
         let applying = control.lock().unwrap().state == "applying";
         if operation.is_none()
-            && (rotating || applying || (!finalized && matches!(s.state, State::Fault | State::Stopped)))
+            && (rotating
+                || applying
+                || (!finalized && matches!(s.state, State::Fault | State::Stopped)))
         {
             retry_at = None;
             *barrier.lock().unwrap() = None;
             let mut old = capture.take().unwrap();
-            let rotate_data = rotation.as_ref().map(|job| (job.id, job.save, job.name.clone()));
+            let rotate_data = rotation
+                .as_ref()
+                .map(|job| (job.id, job.save, job.name.clone()));
             let database = db.to_string();
             operation = Some((
                 std::thread::spawn(move || {
                     old.stop();
                     let result = (|| -> Result<()> {
-                        if applying || rotating { old.ensure_saved()?; }
+                        if applying || rotating {
+                            old.ensure_saved()?;
+                        }
                         if let Some((id, save, name)) = rotate_data {
-                            if save { crate::storage::update_session_name(std::path::Path::new(&database), id, &name)?; }
-                            else { crate::storage::delete_session(std::path::Path::new(&database), id)?; }
+                            if save {
+                                crate::storage::update_session_name(
+                                    std::path::Path::new(&database),
+                                    id,
+                                    &name,
+                                )?;
+                            } else {
+                                crate::storage::delete_session(
+                                    std::path::Path::new(&database),
+                                    id,
+                                )?;
+                            }
                         }
                         Ok(())
                     })();
@@ -843,7 +965,10 @@ pub fn run(args: &Args) -> Result<()> {
             .route("/api/v1/config", get(get_config).put(put_config))
             .route("/api/v1/status", get(status))
             .route("/api/v1/sessions", get(sessions))
-            .route("/api/v1/sessions/{id}", axum::routing::delete(delete_session_api))
+            .route(
+                "/api/v1/sessions/{id}",
+                axum::routing::delete(delete_session_api),
+            )
             .route("/api/v1/sessions/{id}/history", get(session_history))
             .route("/api/v1/sessions/{id}/measurements", get(measurements_api))
             .route("/api/v1/sessions/{id}/rotate", axum::routing::post(rotate))

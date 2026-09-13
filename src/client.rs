@@ -293,7 +293,10 @@ pub fn run(args: &Args) -> Result<()> {
     let mut editor_revision = 0;
     let mut waiting_config = false;
     loop {
-        let delete_result = if delete_dialog.as_ref().is_some_and(|(_, _, _, prompt)| prompt.busy) {
+        let delete_result = if delete_dialog
+            .as_ref()
+            .is_some_and(|(_, _, _, prompt)| prompt.busy)
+        {
             shared.lock().unwrap().delete_status.take()
         } else {
             None
@@ -435,7 +438,15 @@ pub fn run(args: &Args) -> Result<()> {
         if let Some((id, prompt)) = &mut session_prompt {
             if let Some(choice) = prompt.key(key) {
                 let mut remote = shared.lock().unwrap();
-                if !remote.config_busy && tx.try_send(Command::Rotate(*id, matches!(choice, ui::SessionChoice::Save), prompt.name.clone())).is_ok() {
+                if !remote.config_busy
+                    && tx
+                        .try_send(Command::Rotate(
+                            *id,
+                            matches!(choice, ui::SessionChoice::Save),
+                            prompt.name.clone(),
+                        ))
+                        .is_ok()
+                {
                     remote.config_busy = true;
                     remote.message = "正在排空缓存并切换会话…".into();
                     session_prompt = None;
@@ -464,10 +475,10 @@ pub fn run(args: &Args) -> Result<()> {
             continue;
         }
         if history {
-            let data=shared.lock().unwrap();
-            if let Some(response)=&data.history_data {
-                if let Some(query)=crate::archive::navigate(response,key.code) {
-                    let _=tx.try_send(Command::History(response.session_id,query));
+            let data = shared.lock().unwrap();
+            if let Some(response) = &data.history_data {
+                if let Some(query) = crate::archive::navigate(response, key.code) {
+                    let _ = tx.try_send(Command::History(response.session_id, query));
                     continue;
                 }
             }
@@ -477,8 +488,17 @@ pub fn run(args: &Args) -> Result<()> {
             let data = shared.lock().unwrap();
             if !data.config_busy {
                 if let Some(session) = data.sessions.get(selection) {
-                    let name = if session.name.is_empty() { format!("{} - {}", session.started_at, session.ended_at.as_deref().unwrap_or("采集中")) } else { session.name.clone() };
-                    delete_dialog = Some((session.id, name, session.saved, ui::DeletePrompt::new()));
+                    let name = if session.name.is_empty() {
+                        format!(
+                            "{} - {}",
+                            session.started_at,
+                            session.ended_at.as_deref().unwrap_or("采集中")
+                        )
+                    } else {
+                        session.name.clone()
+                    };
+                    delete_dialog =
+                        Some((session.id, name, session.saved, ui::DeletePrompt::new()));
                 }
             }
             continue;
@@ -491,7 +511,18 @@ pub fn run(args: &Args) -> Result<()> {
                 let data = shared.lock().unwrap();
                 if !data.config_busy {
                     if let Some(id) = data.live.as_ref().and_then(|l| l.session_id) {
-                        let name = data.sessions.iter().find(|s| s.id == id).map(|s| format!("{} - {}", s.started_at, chrono::Utc::now().format("%Y-%m-%d %H:%M:%SZ"))).unwrap_or_default();
+                        let name = data
+                            .sessions
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| {
+                                format!(
+                                    "{} - {}",
+                                    s.started_at,
+                                    chrono::Utc::now().format("%Y-%m-%d %H:%M:%SZ")
+                                )
+                            })
+                            .unwrap_or_default();
                         session_prompt = Some((id, ui::SessionPrompt::new(name)));
                     }
                 }
@@ -514,7 +545,9 @@ pub fn run(args: &Args) -> Result<()> {
                 Some(Command::Sessions(None))
             }
             KeyCode::Esc => {
-                if shared.lock().unwrap().history_data.take().is_none() {history = false;}
+                if shared.lock().unwrap().history_data.take().is_none() {
+                    history = false;
+                }
                 None
             }
             KeyCode::Down if history => {
@@ -535,7 +568,12 @@ pub fn run(args: &Args) -> Result<()> {
                     .last()
                     .map(|s| Command::Sessions(Some(s.id)))
             }
-            KeyCode::Enter if history => shared.lock().unwrap().sessions.get(selection).map(|s| Command::History(s.id, crate::archive::Query::default())),
+            KeyCode::Enter if history => shared
+                .lock()
+                .unwrap()
+                .sessions
+                .get(selection)
+                .map(|s| Command::History(s.id, crate::archive::Query::default())),
             KeyCode::Char('r') => {
                 refresh.store(true, Ordering::Relaxed);
                 selection = 0;
@@ -552,9 +590,18 @@ pub fn run(args: &Args) -> Result<()> {
                 } else {
                     data.live.as_ref().and_then(|l| l.session_id)
                 };
-                if history { id.map(Command::Delete) } else { id.map(Command::Download) }
+                if history {
+                    id.map(Command::Delete)
+                } else {
+                    id.map(Command::Download)
+                }
             }
-            KeyCode::Char('v') if history => shared.lock().unwrap().sessions.get(selection).map(|s| Command::Measurements(s.id,None)),
+            KeyCode::Char('v') if history => shared
+                .lock()
+                .unwrap()
+                .sessions
+                .get(selection)
+                .map(|s| Command::Measurements(s.id, None)),
             _ => None,
         };
         if let Some(command) = command {

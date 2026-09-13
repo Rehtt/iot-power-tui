@@ -15,7 +15,9 @@ impl CaptureWorkspace {
         let row: Option<(String, String)> = conn.query_row(
             "SELECT started_at,coalesce(ended_at,started_at) FROM sessions ORDER BY id DESC LIMIT 1",
             [], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-        Ok(row.map(|(a,b)| format!("{a} - {b}")).unwrap_or_else(|| "未命名会话".into()))
+        Ok(row
+            .map(|(a, b)| format!("{a} - {b}"))
+            .unwrap_or_else(|| "未命名会话".into()))
     }
     pub fn new(target: &str) -> Result<Self> {
         let target = std::path::absolute(target).context("resolve save destination")?;

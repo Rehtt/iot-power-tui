@@ -467,13 +467,20 @@ pub fn import_capture(
 pub fn time_range_name(start: &str, end: &str) -> String {
     fn display(value: &str) -> String {
         chrono::DateTime::parse_from_rfc3339(value)
-            .map(|t| t.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M:%SZ").to_string())
+            .map(|t| {
+                t.with_timezone(&chrono::Utc)
+                    .format("%Y-%m-%d %H:%M:%SZ")
+                    .to_string()
+            })
             .unwrap_or_else(|_| value.into())
     }
     format!("{} - {}", display(start), display(end))
 }
 pub fn validate_session_name(name: &str) -> Result<String> {
-    ensure!(!name.chars().any(char::is_control), "name contains control characters");
+    ensure!(
+        !name.chars().any(char::is_control),
+        "name contains control characters"
+    );
     let name = name.trim();
     ensure!(name.len() <= 128, "name exceeds 128 UTF-8 bytes");
     Ok(name.into())
@@ -484,8 +491,15 @@ pub fn update_session_name(path: &std::path::Path, id: i64, name: &str) -> Resul
     let tx = conn.transaction()?;
     let mut name = validate_session_name(name)?;
     if name.is_empty() {
-        let (start, end): (String, Option<String>) = tx.query_row("SELECT started_at,ended_at FROM sessions WHERE id=?1", [id], |r| Ok((r.get(0)?,r.get(1)?)))?;
-        name = time_range_name(&start, &end.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()));
+        let (start, end): (String, Option<String>) = tx.query_row(
+            "SELECT started_at,ended_at FROM sessions WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        name = time_range_name(
+            &start,
+            &end.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        );
     }
     let changed = tx.execute("UPDATE sessions SET name=?1 WHERE id=?2", params![name, id])?;
     ensure!(changed == 1, "session not found");
@@ -498,7 +512,9 @@ pub fn delete_session(path: &std::path::Path, id: i64) -> Result<()> {
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .context("begin session deletion")?;
-    let exists: u64 = tx.query_row("SELECT count(*) FROM sessions WHERE id=?1", [id], |r| r.get(0))?;
+    let exists: u64 = tx.query_row("SELECT count(*) FROM sessions WHERE id=?1", [id], |r| {
+        r.get(0)
+    })?;
     ensure!(exists == 1, "session not found");
     // The frame_id/end_frame_id indexes are created by initialize_schema. They
     // make SQLite's foreign-key checks during frame deletion logarithmic.
@@ -506,7 +522,10 @@ pub fn delete_session(path: &std::path::Path, id: i64) -> Result<()> {
         .context("delete session measurements")?;
     tx.execute("DELETE FROM frames WHERE session_id=?1", [id])
         .context("delete session frames")?;
-    ensure!(tx.execute("DELETE FROM sessions WHERE id=?1", [id])? == 1, "session not found");
+    ensure!(
+        tx.execute("DELETE FROM sessions WHERE id=?1", [id])? == 1,
+        "session not found"
+    );
     tx.commit().context("commit session deletion")?;
     Ok(())
 }
@@ -529,9 +548,27 @@ mod tests {
         drop(conn);
         super::delete_session(&path, 1).unwrap();
         let conn = rusqlite::Connection::open(&path).unwrap();
-        assert_eq!(conn.query_row("SELECT count(*) FROM sessions", [], |r|r.get::<_,i64>(0)).unwrap(), 1);
-        assert_eq!(conn.query_row("SELECT count(*) FROM frames WHERE session_id=1", [], |r|r.get::<_,i64>(0)).unwrap(), 0);
-        assert_eq!(conn.query_row("SELECT count(*) FROM measurements WHERE session_id=2", [], |r|r.get::<_,i64>(0)).unwrap(), 1);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM sessions", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM frames WHERE session_id=1", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM measurements WHERE session_id=2",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
     }
     #[test]
     #[ignore = "manual hardware throughput benchmark; synthetic data only"]

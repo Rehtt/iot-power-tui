@@ -150,15 +150,27 @@ fn begin_operation(
                     if save {
                         runtime.ensure_saved()?;
                         let conn = rusqlite::Connection::open(&workspace.database)?;
-                        let id: i64 = conn.query_row("SELECT id FROM sessions ORDER BY id DESC LIMIT 1", [], |r| r.get(0))?;
+                        let id: i64 = conn.query_row(
+                            "SELECT id FROM sessions ORDER BY id DESC LIMIT 1",
+                            [],
+                            |r| r.get(0),
+                        )?;
                         crate::storage::update_session_name(&workspace.database, id, &name)?;
                         progress.lock().unwrap().message = "保存旧会话到目标数据库".into();
-                        workspace.save(|done,total| { let mut p=progress.lock().unwrap(); p.done=done; p.total=total; })?;
+                        workspace.save(|done, total| {
+                            let mut p = progress.lock().unwrap();
+                            p.done = done;
+                            p.total = total;
+                        })?;
                     } else {
                         progress.lock().unwrap().message = "丢弃旧会话数据".into();
                         workspace.discard()?;
                     }
-                    Ok(Completion { exit: false, saved: save, warning: None })
+                    Ok(Completion {
+                        exit: false,
+                        saved: save,
+                        warning: None,
+                    })
                 }
                 OperationKind::Reconfigure(_) => {
                     runtime.ensure_saved()?;
@@ -306,7 +318,9 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
                         notice = None;
                     }
                     if matches!(&kind, OperationKind::Stop) {
-                        session_prompt = Some(ui::SessionPrompt::new(workspace.as_ref().unwrap().suggested_name()?));
+                        session_prompt = Some(ui::SessionPrompt::new(
+                            workspace.as_ref().unwrap().suggested_name()?,
+                        ));
                     }
                     if matches!(kind, OperationKind::Rotate { .. }) {
                         let next_workspace = workspace::CaptureWorkspace::new(&target_label)?;
@@ -315,7 +329,11 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
                         rate_at = Instant::now();
                         rate_count = 0;
                         rate = 0.0;
-                        runtime = Some(Runtime::start_config(args.source(), workspace.as_ref().unwrap().database.display().to_string(), config));
+                        runtime = Some(Runtime::start_config(
+                            args.source(),
+                            workspace.as_ref().unwrap().database.display().to_string(),
+                            config,
+                        ));
                         shared = runtime.as_ref().unwrap().shared.clone();
                     }
                     if matches!(kind, OperationKind::CheckEmpty) {
@@ -363,7 +381,9 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
             if let Some(edit) = &editor {
                 edit.render(f);
             }
-            if let Some(prompt) = &session_prompt { prompt.render(f); }
+            if let Some(prompt) = &session_prompt {
+                prompt.render(f);
+            }
         })?;
         if !event::poll(frame_deadline.saturating_duration_since(Instant::now()))? {
             continue;
@@ -374,8 +394,15 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
         if key.kind != KeyEventKind::Press || operation.is_some() {
             continue;
         }
-        if key.code == event::KeyCode::Char('h') && session_prompt.is_none() && editor.is_none() && settings.dialog.is_none() {
-            archive::browse(vec![std::path::PathBuf::from(&target_label), std::path::PathBuf::from(&cache_label)])?;
+        if key.code == event::KeyCode::Char('h')
+            && session_prompt.is_none()
+            && editor.is_none()
+            && settings.dialog.is_none()
+        {
+            archive::browse(vec![
+                std::path::PathBuf::from(&target_label),
+                std::path::PathBuf::from(&cache_label),
+            ])?;
             enable_raw_mode()?;
             execute!(stdout(), EnterAlternateScreen)?;
             terminal.clear()?;
@@ -385,7 +412,15 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
             if let Some(choice) = prompt.key(key) {
                 let name = prompt.name.clone();
                 session_prompt = None;
-                operation = Some(begin_operation(runtime.take().unwrap(), workspace.take().unwrap(), OperationKind::Rotate { save: choice == ui::SessionChoice::Save, name }, progress.clone()));
+                operation = Some(begin_operation(
+                    runtime.take().unwrap(),
+                    workspace.take().unwrap(),
+                    OperationKind::Rotate {
+                        save: choice == ui::SessionChoice::Save,
+                        name,
+                    },
+                    progress.clone(),
+                ));
             }
             continue;
         }
@@ -424,9 +459,7 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
                     }
                 }
                 ui::Action::Finish(action) => Some(OperationKind::Finish(action)),
-                ui::Action::StopRestart => {
-                    Some(OperationKind::Stop)
-                }
+                ui::Action::StopRestart => Some(OperationKind::Stop),
             }
         };
         if let Some(kind) = kind {

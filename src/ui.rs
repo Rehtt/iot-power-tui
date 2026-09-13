@@ -23,20 +23,39 @@ pub enum Action {
     Configure,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum SessionChoice { Save, Discard }
+pub enum SessionChoice {
+    Save,
+    Discard,
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum DeleteChoice { Confirm, Cancel }
+pub enum DeleteChoice {
+    Confirm,
+    Cancel,
+}
 pub struct DeletePrompt {
     pub choice: usize,
     pub busy: bool,
     pub error: Option<String>,
 }
 impl DeletePrompt {
-    pub fn new() -> Self { Self { choice: 1, busy: false, error: None } }
+    pub fn new() -> Self {
+        Self {
+            choice: 1,
+            busy: false,
+            error: None,
+        }
+    }
     pub fn key(&mut self, key: KeyEvent) -> Option<DeleteChoice> {
-        if self.busy { return None; }
+        if self.busy {
+            return None;
+        }
         match key.code {
-            KeyCode::Up | KeyCode::Left | KeyCode::Down | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => self.choice = 1 - self.choice,
+            KeyCode::Up
+            | KeyCode::Left
+            | KeyCode::Down
+            | KeyCode::Right
+            | KeyCode::Tab
+            | KeyCode::BackTab => self.choice = 1 - self.choice,
             KeyCode::Char('y') => self.choice = 0,
             KeyCode::Char('n') | KeyCode::Esc => return Some(DeleteChoice::Cancel),
             KeyCode::Enter if self.choice == 0 => return Some(DeleteChoice::Confirm),
@@ -46,30 +65,82 @@ impl DeletePrompt {
         None
     }
     pub fn render(&self, f: &mut Frame<'_>, id: i64, name: &str, records: u64) {
-        let state = if self.busy { "正在删除，请稍候…" } else { "删除操作不可恢复。" };
+        let state = if self.busy {
+            "正在删除，请稍候…"
+        } else {
+            "删除操作不可恢复。"
+        };
         let error = self.error.as_deref().unwrap_or("");
         let text = format!("会话：{name}\nID：{id}\n记录：{records}\n\n{state}\n{error}");
-        modal_choices(f, " 删除历史会话 ", &text, if self.busy { None } else { Some(self.choice) }, &["[y/Enter] 确认删除", "[n/Esc] 取消"]);
+        modal_choices(
+            f,
+            " 删除历史会话 ",
+            &text,
+            if self.busy { None } else { Some(self.choice) },
+            &["[y/Enter] 确认删除", "[n/Esc] 取消"],
+        );
     }
 }
-pub struct SessionPrompt { pub choice: usize, pub name: String, pub closed: bool, replace: bool }
+pub struct SessionPrompt {
+    pub choice: usize,
+    pub name: String,
+    pub closed: bool,
+    replace: bool,
+}
 impl SessionPrompt {
-    pub fn new(name: String) -> Self { Self { choice: 0, name, closed: false, replace: true } }
+    pub fn new(name: String) -> Self {
+        Self {
+            choice: 0,
+            name,
+            closed: false,
+            replace: true,
+        }
+    }
     pub fn key(&mut self, key: KeyEvent) -> Option<SessionChoice> {
-        if key.code == KeyCode::Esc { self.closed = true; return Some(SessionChoice::Discard); }
+        if key.code == KeyCode::Esc {
+            self.closed = true;
+            return Some(SessionChoice::Discard);
+        }
         match key.code {
-            KeyCode::Up | KeyCode::Left | KeyCode::BackTab | KeyCode::Down | KeyCode::Right | KeyCode::Tab => self.choice = 1 - self.choice,
+            KeyCode::Up
+            | KeyCode::Left
+            | KeyCode::BackTab
+            | KeyCode::Down
+            | KeyCode::Right
+            | KeyCode::Tab => self.choice = 1 - self.choice,
             KeyCode::Char('n') if self.replace => return Some(SessionChoice::Discard),
             KeyCode::Char('y') if self.replace => self.choice = 0,
             KeyCode::Enter if self.choice == 1 => return Some(SessionChoice::Discard),
-            KeyCode::Enter => { let n=self.name.trim().to_string(); if !n.is_empty() && n.len()<=128 && !n.chars().any(char::is_control) { return Some(SessionChoice::Save); } }
-            KeyCode::Backspace => { if self.replace { self.name.clear(); self.replace=false; } else { self.name.pop(); } }
-            KeyCode::Char(c) if !c.is_control() => { if self.replace { self.name.clear(); self.replace=false; } if self.name.len()+c.len_utf8()<=128 { self.name.push(c); } }
+            KeyCode::Enter => {
+                let n = self.name.trim().to_string();
+                if !n.is_empty() && n.len() <= 128 && !n.chars().any(char::is_control) {
+                    return Some(SessionChoice::Save);
+                }
+            }
+            KeyCode::Backspace => {
+                if self.replace {
+                    self.name.clear();
+                    self.replace = false;
+                } else {
+                    self.name.pop();
+                }
+            }
+            KeyCode::Char(c) if !c.is_control() => {
+                if self.replace {
+                    self.name.clear();
+                    self.replace = false;
+                }
+                if self.name.len() + c.len_utf8() <= 128 {
+                    self.name.push(c);
+                }
+            }
             _ => {}
         }
         None
     }
-    pub fn render(&self, f: &mut Frame<'_>) { modal(f, " 会话切换 ", &format!("保存旧会话并创建新会话？\n名称：{}\n输入名称后按 Enter 保存；n 直接丢弃。\n名称长度 1–128 字节。", self.name), Some(self.choice)); }
+    pub fn render(&self, f: &mut Frame<'_>) {
+        modal(f, " 会话切换 ", &format!("保存旧会话并创建新会话？\n名称：{}\n输入名称后按 Enter 保存；n 直接丢弃。\n名称长度 1–128 字节。", self.name), Some(self.choice));
+    }
 }
 pub struct UiState {
     pub metric: usize,
@@ -386,9 +457,21 @@ pub fn render(f: &mut Frame<'_>, v: View<'_>) {
     }
 }
 fn modal(f: &mut Frame<'_>, title: &str, text: &str, choice: Option<usize>) {
-    modal_choices(f, title, text, choice, &["[y] 保存并退出", "[n] 不保存退出", "[Esc] 取消"]);
+    modal_choices(
+        f,
+        title,
+        text,
+        choice,
+        &["[y] 保存并退出", "[n] 不保存退出", "[Esc] 取消"],
+    );
 }
-fn modal_choices(f: &mut Frame<'_>, title: &str, text: &str, choice: Option<usize>, labels: &[&str]) {
+fn modal_choices(
+    f: &mut Frame<'_>,
+    title: &str,
+    text: &str,
+    choice: Option<usize>,
+    labels: &[&str],
+) {
     let area = f.area();
     let width = area.width.saturating_sub(4).clamp(1, 100).min(area.width);
     let height = area
@@ -630,15 +713,23 @@ mod tests {
     #[test]
     fn delete_prompt_is_modal_and_reports_busy_or_error() {
         let mut prompt = DeletePrompt::new();
-        assert_eq!(prompt.key(KeyCode::Enter.into()), Some(DeleteChoice::Cancel));
+        assert_eq!(
+            prompt.key(KeyCode::Enter.into()),
+            Some(DeleteChoice::Cancel)
+        );
         let mut prompt = DeletePrompt::new();
         assert_eq!(prompt.key(KeyCode::Char('y').into()), None);
-        assert_eq!(prompt.key(KeyCode::Enter.into()), Some(DeleteChoice::Confirm));
+        assert_eq!(
+            prompt.key(KeyCode::Enter.into()),
+            Some(DeleteChoice::Confirm)
+        );
         prompt.busy = true;
         assert_eq!(prompt.key(KeyCode::Esc.into()), None);
         prompt.error = Some("删除失败".into());
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|f| prompt.render(f, 7, "测试会话", 12)).unwrap();
+        terminal
+            .draw(|f| prompt.render(f, 7, "测试会话", 12))
+            .unwrap();
         let text = terminal.backend().to_string();
         assert!(text.contains("删除历史会话"));
         assert!(text.contains("正在删除"));

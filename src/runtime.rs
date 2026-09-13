@@ -338,7 +338,9 @@ fn process(
         }
         if capture_started.is_some() {
             let mut s = shared.lock().unwrap();
-            if s.state == State::Capturing { s.duration_secs = capture_started.unwrap().elapsed().as_secs_f64(); }
+            if s.state == State::Capturing {
+                s.duration_secs = capture_started.unwrap().elapsed().as_secs_f64();
+            }
         }
         let message = rx.recv_timeout(Duration::from_millis(20));
         let end = matches!(
@@ -347,9 +349,11 @@ fn process(
         );
         let result = (|| -> Result<()> {
             match message {
-                Ok(Message::Ready(info)) => { capture_started = Some(Instant::now()); jobs
-                    .send(WriteJob::Ready(info))
-                    .context("database writer disconnected")?; }
+                Ok(Message::Ready(info)) => {
+                    capture_started = Some(Instant::now());
+                    jobs.send(WriteJob::Ready(info))
+                        .context("database writer disconnected")?;
+                }
                 Ok(Message::Batch(batch)) => {
                     if shared.lock().unwrap().buffered_bytes
                         >= (config.buffer_size_bytes + largest_block) * 2
@@ -670,7 +674,7 @@ mod tests {
                 transport: "mock",
                 calibration: vec![],
                 received: chrono::Utc::now(),
-            name: None,
+                name: None,
             }))
             .unwrap();
         assert!(sink
