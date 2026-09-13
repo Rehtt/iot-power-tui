@@ -336,10 +336,10 @@ fn process(
             history = crate::history::History::default();
             generation = current_generation;
         }
-        if capture_started.is_some() {
+        if let Some(start) = capture_started {
             let mut s = shared.lock().unwrap();
             if s.state == State::Capturing {
-                s.duration_secs = capture_started.unwrap().elapsed().as_secs_f64();
+                s.duration_secs = start.elapsed().as_secs_f64();
             }
         }
         let message = rx.recv_timeout(Duration::from_millis(20));

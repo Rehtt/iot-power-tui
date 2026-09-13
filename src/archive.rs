@@ -234,42 +234,6 @@ pub fn read(path: &Path, id: i64, query: &Query, cancel: &AtomicBool) -> Result<
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn full_session_is_weighted_bounded_and_read_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("old.db");
-        let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("CREATE TABLE sessions(id INTEGER PRIMARY KEY); INSERT INTO sessions VALUES(1); CREATE TABLE measurements(id INTEGER PRIMARY KEY,session_id INTEGER,ts TEXT,voltage_v REAL,current_a REAL,power_w REAL,source_count INTEGER,voltage_max REAL); INSERT INTO measurements VALUES(1,1,'2026-01-01T00:00:00Z',1,2,3,1,9),(2,1,'2026-01-01T00:00:01Z',3,4,5,3,3);").unwrap();
-        drop(conn);
-        let before = std::fs::read(&path).unwrap();
-        let result = read(
-            &path,
-            1,
-            &Query {
-                points: Some(1),
-                ..Default::default()
-            },
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        assert_eq!(result.points.len(), 1);
-        assert_eq!(result.points[0].samples, 4);
-        assert_eq!(result.points[0].voltage_v, 2.5);
-        assert_eq!(result.points[0].max[0], 9.0);
-        assert_eq!(result.statistics.samples, 4);
-        assert_eq!(result.statistics.average_voltage_v, 2.5);
-        assert_eq!(result.statistics.maximum_voltage_v, 9.0);
-        assert_eq!(result.statistics.duration_secs, 1.0);
-        assert!(result.points[0].break_before);
-        assert_eq!(before, std::fs::read(&path).unwrap());
-        assert!(read(&path, 2, &Query::default(), &AtomicBool::new(false)).is_err());
-        assert!(read(&path, 1, &Query::default(), &AtomicBool::new(true)).is_err());
-    }
-}
-
 pub fn render(f: &mut ratatui::Frame<'_>, response: &Response, metric: usize) {
     use ratatui::{
         prelude::*,
@@ -612,4 +576,41 @@ pub fn navigate(response: &Response, key: crossterm::event::KeyCode) -> Option<Q
         to: Some(chrono::DateTime::from_timestamp_micros(b)?.to_rfc3339()),
         points: Some(600),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_session_is_weighted_bounded_and_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE sessions(id INTEGER PRIMARY KEY); INSERT INTO sessions VALUES(1); CREATE TABLE measurements(id INTEGER PRIMARY KEY,session_id INTEGER,ts TEXT,voltage_v REAL,current_a REAL,power_w REAL,source_count INTEGER,voltage_max REAL); INSERT INTO measurements VALUES(1,1,'2026-01-01T00:00:00Z',1,2,3,1,9),(2,1,'2026-01-01T00:00:01Z',3,4,5,3,3);").unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+        let result = read(
+            &path,
+            1,
+            &Query {
+                points: Some(1),
+                ..Default::default()
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(result.points.len(), 1);
+        assert_eq!(result.points[0].samples, 4);
+        assert_eq!(result.points[0].voltage_v, 2.5);
+        assert_eq!(result.points[0].max[0], 9.0);
+        assert_eq!(result.statistics.samples, 4);
+        assert_eq!(result.statistics.average_voltage_v, 2.5);
+        assert_eq!(result.statistics.maximum_voltage_v, 9.0);
+        assert_eq!(result.statistics.duration_secs, 1.0);
+        assert!(result.points[0].break_before);
+        assert_eq!(before, std::fs::read(&path).unwrap());
+        assert!(read(&path, 2, &Query::default(), &AtomicBool::new(false)).is_err());
+        assert!(read(&path, 1, &Query::default(), &AtomicBool::new(true)).is_err());
+    }
 }
