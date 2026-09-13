@@ -41,6 +41,8 @@ pub struct Shared {
     pub records: u64,
     pub buffered_bytes: usize,
     pub writing_bytes: usize,
+    pub committed_bytes: u64,
+    pub duration_secs: f64,
     pub config: Config,
     pub gaps: u64,
     pub invalid: u64,
@@ -110,6 +112,7 @@ impl Recovery {
             let mut s = shared.lock().unwrap();
             s.saved += rows;
             s.saved_source += samples;
+            s.committed_bytes = s.committed_bytes.saturating_add(bytes as u64);
             s.buffered_bytes = s.buffered_bytes.saturating_sub(bytes);
             s.writing_bytes = s.writing_bytes.saturating_sub(bytes);
         }
@@ -304,6 +307,7 @@ fn process(
     let mut pending = VecDeque::new();
     let mut bytes = 0usize;
     let mut largest_block = 0usize;
+    let mut capture_started: Option<Instant> = None;
     let add = |b: RecordedBatch, pending: &mut VecDeque<RecordedBatch>, bytes: &mut usize| {
         if b.frame.is_none() && b.records.is_empty() {
             return;
@@ -332,6 +336,10 @@ fn process(
             history = crate::history::History::default();
             generation = current_generation;
         }
+        if capture_started.is_some() {
+            let mut s = shared.lock().unwrap();
+            if s.state == State::Capturing { s.duration_secs = capture_started.unwrap().elapsed().as_secs_f64(); }
+        }
         let message = rx.recv_timeout(Duration::from_millis(20));
         let end = matches!(
             message,
@@ -339,9 +347,9 @@ fn process(
         );
         let result = (|| -> Result<()> {
             match message {
-                Ok(Message::Ready(info)) => jobs
+                Ok(Message::Ready(info)) => { capture_started = Some(Instant::now()); jobs
                     .send(WriteJob::Ready(info))
-                    .context("database writer disconnected")?,
+                    .context("database writer disconnected")?; }
                 Ok(Message::Batch(batch)) => {
                     if shared.lock().unwrap().buffered_bytes
                         >= (config.buffer_size_bytes + largest_block) * 2

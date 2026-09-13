@@ -276,3 +276,10 @@ python3 tests/service_config.py  # 设置、排空失败重试、配置冲突与
 本地 TUI 和 Client 按 `s` 结束当前会话并打开保存对话框。保存时可输入 1–128 字节的 UTF-8 名称；留空会使用起止时间段生成名称。选择丢弃会删除服务端或本地暂存的该会话数据并开始新会话。
 
 Service 提供 `POST /api/v1/sessions/{id}/rotate`，请求体为 `{"action":"save","name":"测试电源 01"}` 或 `{"action":"discard"}`。会话列表的 `name` 字段和下载数据库中的 `sessions.name` 保留该名称。
+
+### 历史数据与统计
+
+- `h` 打开历史会话浏览；Enter 查看历史波形，`1/2/3` 切换电压/电流/功率，`[`/`]` 缩放，左右键移动，Home 恢复全范围，Esc 返回。
+- `--history --db path` 以只读方式浏览已有数据库，不连接设备。
+- 实时界面中的“记录时长”是当前会话采集经过时间；“累计写入”是成功提交到 SQLite 的数据字节数，缓存占用另行显示。
+- Service 历史接口：`GET /api/v1/sessions/{id}/history?points=600`，`points` 范围为 1–2000，可附带 `from`、`to` RFC3339 时间。

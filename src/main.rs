@@ -1,3 +1,4 @@
+mod archive;
 mod client;
 mod domain;
 mod history;
@@ -26,7 +27,7 @@ use std::{
 
 #[derive(Parser, Debug)]
 #[command(name="iot-power-tui",about="IoT Power CC USB 终端采集工具",group(ArgGroup::new("source").args(["usb","mock","replay","port","list_devices"]).required(false)))]
-#[command(group(ArgGroup::new("input_or_mode").args(["usb", "mock", "replay", "port", "list_devices", "service", "client"]).required(true).multiple(true)))]
+#[command(group(ArgGroup::new("input_or_mode").args(["usb", "mock", "replay", "port", "list_devices", "service", "client", "history"]).required(true).multiple(true)))]
 #[command(group(ArgGroup::new("remote").args(["service", "client"])))]
 #[command(group(ArgGroup::new("usb_mode").args(["usb", "service"]).multiple(true)))]
 struct Args {
@@ -36,6 +37,8 @@ struct Args {
     service: bool,
     #[arg(long, conflicts_with_all=["usb","mock","replay","port","device","list_devices","db","baud"])]
     client: bool,
+    #[arg(long, conflicts_with_all=["usb","mock","replay","port","service","client","list_devices","device"])]
+    history: bool,
     #[arg(long, requires = "remote")]
     addr: Option<std::net::SocketAddr>,
     #[arg(long, requires = "client", conflicts_with_all=["source","service","device"], default_value = "./downloads")]
@@ -227,6 +230,9 @@ fn main() -> Result<()> {
     if args.list_devices {
         return source::usb::list_devices();
     }
+    if args.history {
+        return show_history(&args.db);
+    }
     if args.service {
         return network::run(&args);
     }
@@ -240,6 +246,9 @@ fn main() -> Result<()> {
     let workspace = workspace::CaptureWorkspace::new(&args.db)?;
     let cache = workspace.database.display().to_string();
     run_tui(&args, workspace).with_context(|| format!("未清理的采集缓存（若存在）：{cache}"))
+}
+fn show_history(path: &str) -> Result<()> {
+    archive::browse(vec![std::path::PathBuf::from(path)])
 }
 fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
     let target_label = workspace.target.display().to_string();
@@ -363,6 +372,13 @@ fn run_tui(args: &Args, workspace: workspace::CaptureWorkspace) -> Result<()> {
             continue;
         };
         if key.kind != KeyEventKind::Press || operation.is_some() {
+            continue;
+        }
+        if key.code == event::KeyCode::Char('h') && session_prompt.is_none() && editor.is_none() && settings.dialog.is_none() {
+            archive::browse(vec![std::path::PathBuf::from(&target_label), std::path::PathBuf::from(&cache_label)])?;
+            enable_raw_mode()?;
+            execute!(stdout(), EnterAlternateScreen)?;
+            terminal.clear()?;
             continue;
         }
         if let Some(prompt) = &mut session_prompt {

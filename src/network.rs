@@ -40,6 +40,8 @@ pub struct Live {
     pub buffered_bytes: usize,
     #[serde(default)]
     pub writing_bytes: usize,
+    #[serde(default)] pub committed_bytes: u64,
+    #[serde(default)] pub duration_secs: f64,
     #[serde(default)]
     pub config: crate::recording::Config,
     pub gaps: u64,
@@ -77,6 +79,8 @@ impl Live {
             records: s.records,
             buffered_bytes: s.buffered_bytes,
             writing_bytes: s.writing_bytes,
+            committed_bytes: s.committed_bytes,
+            duration_secs: s.duration_secs,
             config: s.config,
             gaps: s.gaps,
             invalid: s.invalid,
@@ -113,6 +117,8 @@ impl Live {
             records: self.records,
             buffered_bytes: self.buffered_bytes,
             writing_bytes: self.writing_bytes,
+            committed_bytes: self.committed_bytes,
+            duration_secs: self.duration_secs,
             config: self.config,
             gaps: self.gaps,
             invalid: self.invalid,
@@ -270,6 +276,14 @@ async fn sessions(
         let rows=stmt.query_map([page.before.unwrap_or(i64::MAX)],|r|Ok(Session{id:r.get(0)?,device:r.get(1)?,started_at:r.get(2)?,ended_at:r.get(3)?,saved:r.get(4)?,outcome:r.get(5)?,name:r.get::<_,Option<String>>(6)?.unwrap_or_default()}))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Json(rows))
     }).await.map_err(internal)?.map_err(internal)
+}
+async fn session_history(WebState(api): WebState<Api>, Path(id): Path<i64>, Query(query): Query<crate::archive::Query>) -> Result<Json<crate::archive::Response>, ApiError> {
+    query.validate().map_err(|e| (StatusCode::BAD_REQUEST,e.to_string()))?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _guard = CancelExport(cancel.clone());
+    tokio::task::spawn_blocking(move || crate::archive::read(&api.db,id,&query,&cancel)).await.map_err(internal)?.map(Json).map_err(|e| {
+        if e.to_string() == "session not found" {(StatusCode::NOT_FOUND,e.to_string())} else {internal(e)}
+    })
 }
 #[derive(Deserialize)]
 struct RotateRequest { action: String, name: Option<String> }
@@ -803,6 +817,7 @@ pub fn run(args: &Args) -> Result<()> {
             .route("/api/v1/config", get(get_config).put(put_config))
             .route("/api/v1/status", get(status))
             .route("/api/v1/sessions", get(sessions))
+            .route("/api/v1/sessions/{id}/history", get(session_history))
             .route("/api/v1/sessions/{id}/rotate", axum::routing::post(rotate))
             .route("/api/v1/sessions/{id}/download", get(download))
             .with_state(api);

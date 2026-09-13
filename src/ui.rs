@@ -313,12 +313,14 @@ pub fn render(f: &mut Frame<'_>, v: View<'_>) {
             );
         }
         footer.push_str(&format!(
-            "\n记录 {} Hz · 缓存 {:.2}/{:.2} MB ×2 · 待写 {} 条 · 写盘 {:.2} MB",
+            "\n记录 {} Hz · 时长 {}:{:02} · 缓存 {:.2}/{:.2} MB ×2 · 待写 {} 条 · 累计写入 {:.2} MB",
             v.state.config.sample_rate_hz,
+            (v.state.duration_secs as u64) / 60,
+            (v.state.duration_secs as u64) % 60,
             v.state.buffered_bytes as f64 / 1e6,
             v.state.config.buffer_size_bytes as f64 / 1e6,
             v.state.records.saturating_sub(v.state.saved),
-            v.state.writing_bytes as f64 / 1e6
+            v.state.committed_bytes as f64 / 1e6
         ));
         if let Some(error) = v.notice.or(v.totals.error.as_deref()) {
             if compact {

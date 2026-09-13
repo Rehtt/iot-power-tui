@@ -30,10 +30,12 @@ struct Remote {
     sessions: Vec<Session>,
     message: String,
     downloading: bool,
+    history_data: Option<crate::archive::Response>,
 }
 #[derive(Clone)]
 enum Command {
     Sessions(Option<i64>),
+    History(i64, crate::archive::Query),
     Download(i64),
     Refresh,
     Rotate(i64, bool, String),
@@ -183,6 +185,12 @@ pub fn run(args: &Args) -> Result<()> {
             let downloading = matches!(command,Command::Download(_));
             let result = (|| -> Result<String> {
                 match command {
+                    Command::History(id, query) => {
+                        let response: crate::archive::Response = http.get(format!("{url}/api/v1/sessions/{id}/history")).query(&query).send()?.error_for_status()?.json()?;
+                        ensure!(response.points.len() <= 2000,"oversized history response");
+                        data.lock().unwrap().history_data = Some(response);
+                        Ok("历史波形已加载".into())
+                    }
                     Command::Sessions(before) => {
                         let mut request = http.get(format!("{url}/api/v1/sessions"));
                         if let Some(id) = before {
@@ -194,6 +202,7 @@ pub fn run(args: &Args) -> Result<()> {
                         let sessions: Vec<Session> = serde_json::from_slice(&bytes)?;
                         ensure!(sessions.len() <= 50, "oversized session page");
                         data.lock().unwrap().sessions = sessions;
+                        data.lock().unwrap().history_data = None;
                         Ok("↑/↓ 选择；PgDn 下一页；r 返回最新；d 下载；Esc 关闭".into())
                     }
                     Command::Download(id) => {
@@ -333,12 +342,16 @@ pub fn run(args: &Args) -> Result<()> {
                             }
                         ));
                     }
+                    if let Some(s) = data.sessions.get(selection) {
+                        lines.push(format!("Enter 查看会话 #{} 历史图表数据", s.id));
+                    }
                     f.render_widget(
                         Paragraph::new(lines.join("\n"))
                             .block(Block::default().borders(Borders::ALL).title("历史会话")),
                         area,
                     );
                 }
+                if history { if let Some(response) = &data.history_data {crate::archive::render(f,response,settings.metric);} }
                 if let Some((_, prompt)) = &session_prompt { prompt.render(f); }
                 if let Some(edit) = &editor {
                     edit.render(f);
@@ -385,6 +398,15 @@ pub fn run(args: &Args) -> Result<()> {
             }
             continue;
         }
+        if history {
+            let data=shared.lock().unwrap();
+            if let Some(response)=&data.history_data {
+                if let Some(query)=crate::archive::navigate(response,key.code) {
+                    let _=tx.try_send(Command::History(response.session_id,query));
+                    continue;
+                }
+            }
+        }
         let action = settings.key(key);
         if action == ui::Action::RequestExit {
             break;
@@ -417,7 +439,7 @@ pub fn run(args: &Args) -> Result<()> {
                 Some(Command::Sessions(None))
             }
             KeyCode::Esc => {
-                history = false;
+                if shared.lock().unwrap().history_data.take().is_none() {history = false;}
                 None
             }
             KeyCode::Down if history => {
@@ -438,6 +460,7 @@ pub fn run(args: &Args) -> Result<()> {
                     .last()
                     .map(|s| Command::Sessions(Some(s.id)))
             }
+            KeyCode::Enter if history => shared.lock().unwrap().sessions.get(selection).map(|s| Command::History(s.id, crate::archive::Query::default())),
             KeyCode::Char('r') => {
                 refresh.store(true, Ordering::Relaxed);
                 selection = 0;
